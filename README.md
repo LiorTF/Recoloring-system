@@ -6,7 +6,10 @@ the `.ytd` / `.ydd` files**, while keeping:
 - the design: folds, seams, stitching, prints, logos, stripes, and tonal separation between materials (a white shirt under a black suit stays lighter)
 - skin and tattoos: learned from the ped's own head texture and from skin-tone variants
 - lenses, visors and watch glass: from alpha and from the model's glass-shader UVs
+- metal hardware (zipper pulls, buckles) and the black ink of coloured prints
 - normal / spec maps, face, teeth and hair (never touched)
+
+`src/preview/render.js` renders a `.ydd` mesh with a texture (no GPU) for before/after previews.
 
 Zero dependencies, Node ≥ 18.
 

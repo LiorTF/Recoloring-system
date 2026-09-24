@@ -46,7 +46,7 @@ function paddingFromUV(used, w, h) {
  * @param {{L:Float32Array,A:Float32Array,B:Float32Array}} planes
  * @returns {{mask:Uint8Array, source:string, stats:object}|null}
  */
-function paddingFromImage(rgba, planes, w, h, { tol = 0.02, minCoverage = 0.12, flatStd = 0.004, clothStd = 0.003 } = {}) {
+function paddingFromImage(rgba, planes, w, h, { tol = 0.02, minCoverage = 0.12, maxCoverage = 0.6, flatStd = 0.004, clothStd = 0.003 } = {}) {
   const n = w * h;
   const { L, A, B } = planes;
   // dominant border colour
@@ -76,6 +76,9 @@ function paddingFromImage(rgba, planes, w, h, { tol = 0.02, minCoverage = 0.12, 
   let cov = 0; for (let i = 0; i < n; i++) cov += mask[i];
   const stats = { coverage: cov / n };
   if (cov < n * minCoverage) return null;
+  // a flat fill covering most of the sheet is a flat-coloured GARMENT (low-effort texture
+  // with a small print), not the empty space around UV islands
+  if (cov > n * maxCoverage) return null;
 
   // flatness test on a subsample
   const std = localStd(L, w, h, 2);

@@ -175,3 +175,47 @@ test('UV padding is ignored, but a flat black garment with a flat print is still
   assert.ok(dE(labAt(b, 5), T_LAB) < 0.03, 'black fabric -> target');
   assert.ok(labAt(b, 64 * w + 64)[0] > labAt(b, 5)[0] + 0.1, 'white print stays lighter');
 });
+
+test('coloured print keeps its black ink; smooth shading next to it is still recolored', () => {
+  const w = 512, h = 512; // realistic letter-to-texture proportions
+  const r = rng(33);
+  const src = image(w, h, (x, y) => {
+    // pink-outlined black letter block
+    const inBlock = x >= 50 && x < 110 && y >= 40 && y < 120;
+    const inInner = x >= 56 && x < 104 && y >= 46 && y < 114;
+    if (inInner) return [12, 12, 12];
+    if (inBlock) return [232, 110, 170];
+    // grey fabric with a smooth dark shadow gradient on the left
+    const shade = x < 30 ? 60 + x * 3 : 150;
+    return [shade + (r() - 0.5) * 6, shade, shade + 2].map(Math.round);
+  });
+  const { pixels } = recolorRGBA(src, w, h, TARGET);
+  const at = (x, y) => labAt(pixels, y * w + x);
+  const orig = (x, y) => labAt(src, y * w + x);
+  assert.ok(dE(at(80, 80), orig(80, 80)) < 0.03, 'black ink inside the print is kept');
+  assert.ok(dE(at(52, 80), orig(52, 80)) < 0.03, 'pink outline is kept');
+  assert.ok(dE(at(400, 400), T_LAB) < 0.04, 'fabric goes to the target');
+  assert.ok(dE(at(10, 400), orig(10, 400)) > 0.05, 'shadow shading is recolored, not kept as ink');
+});
+
+test('mesh lens detection: flat hole-free pane in a different colour than the frame', () => {
+  const { lensFromMesh } = require('../src/core/lensMesh');
+  const { rgbaToOklabPlanes } = require('../src/color/oklab');
+  // texture: white frame area (top) + black lens area (bottom-left)
+  const W = 128;
+  const tex = image(W, W, (x, y) => (y > 64 && x < 64 ? [5, 5, 5] : [245, 245, 245]));
+  const planes = rgbaToOklabPlanes(tex, W * W);
+  const quad = (pos, uv) => ({ pos: Float32Array.from(pos), uv: Float32Array.from(uv), indices: Uint16Array.from([0, 1, 2, 0, 2, 3]), vertexCount: 4 });
+  // lens: flat quad mapped into the black area
+  const lens = quad([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0], [0.05, 0.55, 0.45, 0.55, 0.45, 0.95, 0.05, 0.95]);
+  // frame ring: 4 thin quads around a hole (bent, so normals disagree) mapped into white
+  const ring = { pos: [], uv: [], indices: [] };
+  const addQuad = (p, u) => { const b = ring.pos.length / 3; ring.pos.push(...p); ring.uv.push(...u); ring.indices.push(b, b + 1, b + 2, b, b + 2, b + 3); };
+  addQuad([0, 0, 0, 1, 0, 0, 1, 0.1, 0.3, 0, 0.1, 0.3], [0.1, 0.05, 0.9, 0.05, 0.9, 0.1, 0.1, 0.1]);
+  addQuad([0, 0, 0, 0.1, 0, 0.3, 0.1, 1, 0.3, 0, 1, 0], [0.1, 0.05, 0.15, 0.05, 0.15, 0.45, 0.1, 0.45]);
+  const frame = { pos: Float32Array.from(ring.pos), uv: Float32Array.from(ring.uv), indices: Uint16Array.from(ring.indices), vertexCount: ring.pos.length / 3 };
+  const res = lensFromMesh([{ mesh: lens }, { mesh: frame }], planes, W, W);
+  assert.ok(res, 'lens found');
+  assert.ok(res.mask[90 * W + 30] > 0.9, 'lens texels protected');
+  assert.ok(res.mask[10 * W + 60] < 0.1, 'frame texels not protected');
+});

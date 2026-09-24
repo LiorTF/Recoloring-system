@@ -8,6 +8,9 @@
 const M = require('./masks');
 const skin = require('../color/skin');
 const { rgbaToOklabPlanes } = require('../color/oklab');
+const { paddingFromUV, paddingFromImage } = require('./padding');
+const { metalFromIslands, metalFromSpecMap } = require('./metal');
+const { lensFromMesh } = require('./lensMesh');
 
 /** Large semi-transparent regions = tinted lenses / visors. */
 function alphaLensMask(rgba, w, h, { minAlpha = 6, maxAlpha = 250, minAreaFrac = 0.002 } = {}) {
@@ -118,17 +121,34 @@ function buildProtectMask(p) {
     const a = alphaLensMask(rgba, w, h);
     if (a) { parts.lensAlpha = a; M.maxInto(protect, a); }
   }
+  if (p.lensMode && p.lensMeshes && p.lensMeshes.length) {
+    const lm = lensFromMesh(p.lensMeshes, planes, w, h);
+    if (lm) { parts.lensMesh = lm.mask; parts.lensPieces = lm.pieces; M.maxInto(protect, lm.mask); }
+  }
   if (p.uv) {
     if (p.uv.lens) { parts.lensUV = M.boxBlur(M.toFloat(p.uv.lens), w, h, 1); M.maxInto(protect, parts.lensUV); }
     if (p.uv.decal) { parts.decalUV = M.boxBlur(M.toFloat(p.uv.decal), w, h, 1); M.maxInto(protect, parts.decalUV); }
     if (p.uv.hair && p.protectHair) { parts.hairUV = M.toFloat(p.uv.hair); M.maxInto(protect, parts.hairUV); }
+  }
+  // UV padding (never visible) – used to exclude empty space from analysis and to find UV islands
+  const padding = paddingFromUV(p.uv && p.uv.used, w, h) || paddingFromImage(rgba, planes, w, h);
+  // Metal hardware (zippers, pulls, buckles): keep as-is. Model spec map first, UV islands second.
+  if (p.keepMetal !== false) {
+    const parts2 = [];
+    if (p.spec) { const s = metalFromSpecMap(p.spec.rgba, p.spec.width, p.spec.height, w, h); if (s) parts2.push(s.mask); }
+    const isl = metalFromIslands(planes, w, h, padding && padding.mask);
+    if (isl) parts2.push(isl.mask);
+    if (parts2.length) {
+      parts.metal = parts2.length === 1 ? parts2[0] : M.maxInto(Float32Array.from(parts2[0]), parts2[1]);
+      M.maxInto(protect, parts.metal);
+    }
   }
   if (p.protectRects && p.protectRects.length) { parts.user = rectMask(p.protectRects, w, h); M.maxInto(protect, parts.user); }
 
   const coverage = {};
   for (const [k, v] of Object.entries(parts)) if (v instanceof Float32Array) coverage[k] = +M.coverage(v).toFixed(4);
   coverage.total = +M.coverage(protect).toFixed(4);
-  return { protect, parts, coverage, planes };
+  return { protect, parts, coverage, planes, padding };
 }
 
 module.exports = { alphaLensMask, uvRoleMasks, buildProtectMask, rectMask };

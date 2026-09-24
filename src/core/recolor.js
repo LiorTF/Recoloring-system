@@ -29,6 +29,15 @@ const DEFAULTS = Object.freeze({
   accentMaxShare: 0.08,       // a hue family covering more than this share of cloth is a material, not an accent
   accentMinChroma: 0.045,     // OKLab chroma below this = neutral (grey/black/white): always tinted
   accentHueDistance: 32,      // degrees away from every material hue to count as an accent
+  accentWeakChroma: 0.02,
+  keepPrintInk: true,         // keep the neutral ink (black/white) of a kept coloured print
+  inkMaxChroma: 0.05,
+  inkMinContrast: 0.18,       // ink must differ this much (OKLab L) from the fabric base
+  inkMaxShare: 0.03,          // bigger neutral regions are fabric panels, not ink
+  inkMinEdge: 0.12,
+  inkReach: 0.06,
+  enclosedMaxShare: 0.03,     // regions fully enclosed by the coloured print (letter interiors) up to this share
+  inkBlobMaxShare: 0.002,     // whole sharp-edged ink blobs touching the print are kept up to this share            // geodesic reach of ink from the coloured print (fraction of texture size)           // median OKLab L step across the ink border (print = sharp, shading = soft)     // accents grow from confident seeds into connected same-hue texels down to this chroma
   contrast: 1.0,              // scales every texel's lightness delta from the base
   chromaFalloff: 0.85,        // how fast target chroma fades in shadows/highlights
   keepChromaVariation: 0.25,  // keep some of the source's relative saturation variation (heather, dirt)
@@ -106,14 +115,21 @@ function analyze(rgba, width, height, protect, options = {}, { ignore = null } =
     if (materialHues.every((h) => angDiff(h, p.hue) > 25)) materialHues.push(p.hue);
   }
 
-  const accent = accentMap(planes, n, materialHues, o, width, height);
+  let accent = accentMap(planes, n, materialHues, o, width, height);
 
   // 2. base lightness from material (non-accent) cloth texels
   const bw = new Float32Array(n);
-  for (let i = 0; i < n; i++) bw[i] = w[i] * (1 - (o.keepAccents ? accent[i] : 0));
+  const weigh = () => { for (let i = 0; i < n; i++) bw[i] = w[i] * (1 - (o.keepAccents ? accent[i] : 0)); };
+  weigh();
+  let stats = weightedMedian(L, bw, n) || weightedMedian(L, w, n);
+  // 3. the print's neutral ink (black outlines/fill of a coloured logo) belongs to the design
+  if (o.keepAccents && o.keepPrintInk) {
+    accent = extendWithInk(accent, planes, width, height, stats.median, o);
+    weigh();
+    stats = weightedMedian(L, bw, n) || stats;
+  }
   let useW = bw;
-  let stats = weightedMedian(L, bw, n);
-  if (!stats) { useW = w; stats = weightedMedian(L, w, n); }
+  if (!weightedMedian(L, bw, n)) useW = w;
   const modes = lightnessModes(L, useW, n, o);
 
   // base chroma (for relative chroma variation)
@@ -140,23 +156,144 @@ function accentMap(planes, n, materialHues, o, width, height) {
   const { A, B } = planes;
   const acc = new Float32Array(n);
   if (!o.keepAccents) return acc;
+  // hue factor: how far this texel's hue is from every material hue
+  const hueFactor = (i) => {
+    if (!materialHues.length) return 1;
+    const hdeg = (Math.atan2(B[i], A[i]) * 180 / Math.PI + 360) % 360;
+    let hd = 360; for (const h of materialHues) hd = Math.min(hd, angDiff(h, hdeg));
+    return smooth(o.accentHueDistance * 0.75, o.accentHueDistance * 1.35, hd);
+  };
+  // Hysteresis (like Canny): confident accent texels seed, then the accent grows into
+  // connected texels of the same hue family down to a much lower chroma. Distressed /
+  // grunge prints are mostly faint, speckled colour (measured: most of a pink print sits
+  // at OKLab C 0.02-0.08), which a single threshold + morphological open used to eat.
+  const strong = new Uint8Array(n), weak = new Uint8Array(n);
   for (let i = 0; i < n; i++) {
     const C = Math.hypot(A[i], B[i]);
-    const cf = smooth(o.accentMinChroma, o.accentMinChroma * 1.8, C);
-    if (cf <= 0) continue;
-    let hd = 180;
-    if (materialHues.length) {
-      const hdeg = (Math.atan2(B[i], A[i]) * 180 / Math.PI + 360) % 360;
-      hd = 360; for (const h of materialHues) hd = Math.min(hd, angDiff(h, hdeg));
-    }
-    acc[i] = cf * smooth(o.accentHueDistance * 0.75, o.accentHueDistance * 1.35, hd);
+    if (C < o.accentWeakChroma) continue;
+    const hf = hueFactor(i);
+    if (hf < 0.5) continue;
+    weak[i] = 1;
+    if (smooth(o.accentMinChroma, o.accentMinChroma * 1.8, C) * hf >= 0.5) strong[i] = 1;
   }
-  if (!width || !height) return acc;
-  // Crisp regions: a logo is either kept or tinted, never half-blended (that reads as a stain).
-  let m = M.threshold(acc, 0.5);
-  m = M.open(m, width, height, 1);
-  m = M.removeSmall(m, width, height, Math.max(6, Math.round(n * 0.00003)));
-  return M.boxBlur(M.toFloat(m), width, height, 1);
+  if (!width || !height) { for (let i = 0; i < n; i++) acc[i] = strong[i]; return acc; }
+  const m = new Uint8Array(n);
+  const stack = [];
+  for (let i = 0; i < n; i++) if (strong[i]) { m[i] = 1; stack.push(i); }
+  while (stack.length) {
+    const p = stack.pop(), x = p % width, y = (p / width) | 0;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const nx = x + dx, ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+      const q = ny * width + nx;
+      if (!m[q] && weak[q]) { m[q] = 1; stack.push(q); }
+    }
+  }
+  // Crisp regions (a logo is kept or tinted, never half-blended); only drop lone specks.
+  const clean = M.removeSmall(m, width, height, Math.max(3, Math.round(n * 0.000004)));
+  return M.boxBlur(M.toFloat(clean), width, height, 1);
+}
+
+/**
+ * Grow the kept design from its coloured parts into the NEUTRAL ink printed with it
+ * (black outlines / fills of a pink logo). Ink = achromatic texels whose tone clearly
+ * differs from the fabric base; a whole ink region is taken when it touches a kept
+ * accent and is print-sized. On a black garment black is not "different from the
+ * fabric", so a logo there never drags the fabric along.
+ */
+function extendWithInk(accent, planes, w, h, baseL, o) {
+  if (!w || !h) return accent;
+  const n = w * h;
+  const { L, A, B } = planes;
+  const ink = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    if (accent[i] >= 0.5) continue;
+    if (Math.hypot(A[i], B[i]) > o.inkMaxChroma) continue;
+    // ink is dark (or near-white) – mid/light greys next to a logo are fabric highlights
+    if ((L[i] <= baseL - o.inkMinContrast && L[i] < 0.32) || L[i] >= 0.92) ink[i] = 1;
+  }
+  const { labels, sizes, count } = M.label(ink, w, h, 1);
+  const touch = new Uint8Array(count);
+  const near = M.dilate(M.threshold(accent, 0.5), w, h, 2);
+  for (let i = 0; i < n; i++) { const l = labels[i]; if (l >= 0 && near[i]) touch[l] = 1; }
+  // Printed ink has SHARP edges; a shadow fold that happens to touch a logo fades out
+  // gradually. Median lightness step across each region's non-accent border.
+  const steps = Array.from({ length: count }, () => []);
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x, l = labels[i];
+    if (l < 0 || !touch[l]) continue;
+    for (const q of [i - 1, i + 1, i - w, i + w]) {
+      if (labels[q] === l || accent[q] >= 0.5) continue;
+      // step over 2 px outward (DXT blocks soften a 1 px edge)
+      const q2 = q + (q - i);
+      const far = q2 >= 0 && q2 < n ? L[q2] : L[q];
+      if (steps[l].length < 4000) steps[l].push(Math.abs(far - L[i]));
+    }
+  }
+  for (let l = 0; l < count; l++) {
+    if (!touch[l]) continue;
+    const st = steps[l];
+    if (!st.length) continue; // fully enclosed by the accent: ink inside the print
+    st.sort((a, b) => a - b);
+    if (st[st.length >> 1] < o.inkMinEdge) touch[l] = 0;
+  }
+  const out = new Float32Array(n);
+  let added = 0;
+  for (let i = 0; i < n; i++) {
+    if (accent[i] >= 0.5) { out[i] = 1; continue; }
+    const l = labels[i];
+    if (l >= 0 && touch[l] && sizes[l] <= n * o.inkBlobMaxShare) { out[i] = 1; added++; }
+  }
+  // Ink is often connected to the fabric's dark shadow folds, so whole regions fail the
+  // test above. Pixel level: ink reachable from the coloured print THROUGH ink within a
+  // short geodesic distance is part of the print; beyond that it fades out smoothly, so
+  // a shadow fold brushing a logo keeps only a soft fade, not the whole fold.
+  const D = Math.max(6, Math.round(Math.max(w, h) * o.inkReach));
+  const dist = new Int32Array(n).fill(-1);
+  let queue = new Int32Array(n), qh = 0, qt = 0;
+  const seed = M.threshold(accent, 0.5);
+  for (let i = 0; i < n; i++) if (seed[i]) { dist[i] = 0; queue[qt++] = i; }
+  while (qh < qt) {
+    const p = queue[qh++], d = dist[p];
+    if (d >= D) continue;
+    const x = p % w, y = (p / w) | 0;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const nx = x + dx, ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+      const q = ny * w + nx;
+      if (dist[q] !== -1 || !ink[q]) continue;
+      dist[q] = d + 1; queue[qt++] = q;
+    }
+  }
+  queue = null;
+  // ...and only where there is print-like edge activity nearby: flames / strokes are thin
+  // (every texel is close to a sharp edge), a shadow fold is wide and smooth
+  const { localStd } = require('./padding');
+  const ls = localStd(L, w, h, Math.max(3, Math.round(Math.max(w, h) / 250)));
+  for (let i = 0; i < n; i++) {
+    const d = dist[i];
+    if (d <= 0) continue;
+    // edge-active (thin strokes, flames) OR near-pure black (solid printed ink); a shadow
+    // fold is dark GREY and smooth, so it passes neither
+    const inkness = Math.max(smooth(0.025, 0.06, ls[i]), 1 - smooth(0.08, 0.15, L[i]));
+    const wgt = (1 - smooth(D * 0.55, D, d)) * inkness;
+    if (wgt > out[i]) { out[i] = wgt; added++; }
+  }
+  // Anything the coloured print fully ENCLOSES (letters inside a pink outline) is print,
+  // after bridging the small gaps a distressed / grunge outline has.
+  const bridged = M.close(seed, w, h, Math.max(2, Math.round(Math.max(w, h) / 700)));
+  // only the COLOURED print can close these loops, so fabric is rarely enclosed
+  const filled = M.fillHoles(bridged, w, h, Math.round(n * o.enclosedMaxShare));
+  for (let i = 0; i < n; i++) if (filled[i] && !seed[i] && out[i] < 1) { out[i] = 1; added++; }
+  if (!added) return accent;
+  return M.boxBlur(out, w, h, 1);
+}
+
+/** Full kept-design mask for any mip level: coloured accents + their neutral ink. */
+function designMask(planes, n, plan, width, height) {
+  const o = plan.options;
+  const acc = accentMap(planes, n, plan.materialHues, o, width, height);
+  return o.keepAccents && o.keepPrintInk ? extendWithInk(acc, planes, width, height, plan.baseL, o) : acc;
 }
 
 /**
@@ -329,7 +466,7 @@ function apply(rgba, width, height, protect, plan, color, cache = {}) {
   const o = plan.options;
   const target = Array.isArray(color) && color.length === 3 && color[0] <= 1.5 ? color : srgb8ToOklab(...parseHex(color));
   const planes = cache.planes || rgbaToOklabPlanes(rgba, n);
-  const accent = cache.accent || accentMap(planes, n, plan.materialHues, o, width, height);
+  const accent = cache.accent || designMask(planes, n, plan, width, height);
   const tint = makeTinter(plan, target);
   const lab = [0, 0, 0], rgb = new Uint8Array(3);
   const memo = new Map();
@@ -373,4 +510,4 @@ function publicPlan(plan) {
   return { baseL, p05, p95, baseC, materialHues, modes, chromaticShare, clothShare };
 }
 
-module.exports = { DEFAULTS, analyze, apply, recolorRGBA, publicPlan, accentMap, lightnessModes, buildToneCurve };
+module.exports = { DEFAULTS, analyze, apply, recolorRGBA, publicPlan, accentMap, designMask, extendWithInk, lightnessModes, buildToneCurve };

@@ -117,7 +117,15 @@ UVs are D3D convention (v down = texture rows), may exceed 0..1 (wrap).
    perfectly flat border-connected fill (local L std ≈ 0) is padding **only if the rest looks like
    shaded cloth** (median local std ≥ 0.003). Measured on the author's textures: shaded garments
    0.008–0.019, a flat black tee with a flat white skeleton print 0.00007 → there the black is the shirt.
-9. A watch prop had a real `ped_alpha` geometry covering a tiny UV patch = the watch glass. That's
+9. **Stale names everywhere, file name wins.** Besides the .ytd texture name, the DrawableDictionary
+   hash inside a renamed .ydd is stale too (`p_eyes_003.ydd` holding a drawable hashed `p_eyes_001`).
+   The internal hash is only used for single-file peds (`ped.ydd`).
+10. **Free-form embedded texture names** (`SpecMap`, `NormalMap`, `foam_SHOE_BUMP`, a diffuse named
+    `Gold_Sunset`): embedded textures are classified by the shader sampler that reads them
+    (`BumpSampler` → normal, `SpecSampler` → spec), then by name, then by content.
+11. **Uploads/zips drop the `^`**: `ig_jayjay_p^p_eyes_003.ydd` arrives as `ig_jayjay_pp_eyes_003.ydd`.
+    `parseName` recovers component names from the tail, including the glued `_p` + `p_` props prefix.
+12. A watch prop had a real `ped_alpha` geometry covering a tiny UV patch = the watch glass. That's
    exactly the "lens" signal we use.
 
 ---
@@ -205,6 +213,41 @@ Tattoos (dark ink) aren't skin-coloured, so they are recovered as **holes enclos
 Decal-shader geometries (`ped_decal*`) → protected via UVs (they're the printed design).
 Hair-shader geometries in hair/berd/head slots → protected unless `recolorHair`.
 
+### Metal hardware (`src/core/metal.js`)
+Zipper pulls, stoppers, buckles, rivets are kept as-is (a dyed garment keeps its metal zipper; forcing
+chrome's black base onto a light target squeezes its highlights into a washed-out blob – reported on a
+real tracksuit). Pixel statistics can't do it: prints/text are just as hard black/white as chrome
+(a gradient-coherence detector fired on a skeleton print, text and a photo print). Structure can:
+* **UV islands**: hardware is laid out as small separate islands (≤ 8 % of the sheet); prints live
+  inside big panels. Islands are segmented on the padding map with dark outlines treated as gaps.
+* An island is metal when its own texels span a very wide tonal range with bright speculars and
+  lots of mid-tones: measured chrome p10 0.29 / p90 0.85 / 61 % mid-tones; fabric pieces are narrow
+  (white panel 0.6–0.9, grey sock 0.3–0.6, knit ribbing has no highlights).
+* With a real spec map in the .ydd, bright spec = shiny parts (`metalFromSpecMap`), unless the whole
+  garment is shiny (latex / patent leather).
+
+### Lenses from the MESH (`src/core/lensMesh.js`)
+Real case: ig_jayjay's glasses have opaque black lenses, same `ped` shader as the frame, alpha 255 –
+no alpha or shader signal. The drawable is split into connected pieces; a piece is a lens when
+(1) its normals agree (area-weighted coherence ≥ 0.75, a pane – not a helmet shell),
+(2) its UV island has no hole (not the frame ring), (3) it is compact (not a temple arm),
+(4) its texels are one even colour, (5) that colour differs from **the frame** = pieces that failed the
+shape tests (comparing against "everything else" made a white bevel look like a lens because the lenses'
+big UV area dragged the average black). Only texels of the lens colour are masked. Guard: lenses are a
+handful of triangles (2 × 24 of 9 712 here) – if > 50 % of triangles look like lens, ignore.
+
+### Print ink (`extendWithInk` in `src/core/recolor.js`)
+A coloured print is usually colour + black ink (pink letters with black fill/outlines, flames).
+Keeping only the colour and tinting the black ink lifts it to grey-brown and the print reads as
+"the pink disappeared" (reported). Ink kept when it is neutral, darker than the fabric by ≥ 0.18 L, and
+* **enclosed** by the coloured print after bridging distressed gaps (letter interiors), or
+* a small sharp-edged blob touching the print, or
+* **reachable** from the print through ink within 6 % of the texture size, weighted by
+  "inkness" = edge activity (thin strokes/flames) OR near-pure black (solid ink).
+A smooth dark-grey shadow fold touching a logo passes none of these.
+Accents themselves grow by hysteresis (confident seeds → connected same-hue texels down to C 0.02),
+because distressed prints are mostly faint speckled colour (measured C 0.02–0.08).
+
 ---
 
 ## 6. Block compression (`src/texture/`)
@@ -227,8 +270,16 @@ Hair-shader geometries in hair/berd/head slots → protected unless `recolorHair
   renamed `a_m_y_runner_01`): head/teeth/hair untouched, bare-hands texture fully protected by the
   ped skin model, suit/shirt/tie keep tonal separation; resource flags + system segment byte-identical,
   every non-recolored texture byte-identical.
-* `npm test`: synthetic peds (skin + tattoo + khaki strip + tinted lens, race variants) assert exact
-  keep/change behaviour.
+* `npm test` (8 tests): synthetic peds (skin + tattoo + khaki strip + tinted lens, race variants),
+  UV padding vs flat garment, print ink vs shadow, mesh lens vs frame.
+* The author's own textures (skeleton tee, WrestleMania tank, leather tracksuit with chrome hardware,
+  two-tone hoodie, grey set with pink/black grunge prints) and ig_jayjay's `p_eyes_003` glasses
+  (.ydd + .ytd): hardware kept chrome, prints keep pink + black, lenses kept from the mesh.
+
+## 7b. Previews
+`src/preview/render.js` is a dependency-free software renderer (orthographic, z-buffer, lambert,
+2× SSAA) that renders a .ydd mesh with any texture – used to check a recolor on the actual model.
+`autoView` faces the camera against a given forward vector (e.g. the lens normal).
 
 ## 8. Known limits / next steps
 * Gen9 (Enhanced) resources are rejected (FiveM uses legacy).

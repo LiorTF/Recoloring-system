@@ -127,6 +127,8 @@ function readGeometryUVs(res, gptr) {
   let off = 0;
   for (let k = 0; k < SEM_TEXCOORD0; k++) if ((flags >>> k) & 1) off += COMPONENT_SIZE[typeOf(k)];
   const uvType = typeOf(SEM_TEXCOORD0);
+  // positions (semantic 0) for mesh-level reasoning (lens detection, previews)
+  const posType = (flags & 1) ? typeOf(0) : 0;
   const vbytes = res.bytes(vdata, stride * vcount);
   const ibytes = res.bytes(iptr, icount * 2);
   if (!vbytes || !ibytes) return null;
@@ -138,7 +140,14 @@ function readGeometryUVs(res, gptr) {
     else if (uvType === 5) { uv[v * 2] = dv.getFloat32(o, true); uv[v * 2 + 1] = dv.getFloat32(o + 4, true); }
     else return null;
   }
+  let pos = null;
+  if (posType === 6) { // Float3
+    pos = new Float32Array(vcount * 3);
+    for (let v = 0; v < vcount; v++) { const o = v * stride; pos[v * 3] = dv.getFloat32(o, true); pos[v * 3 + 1] = dv.getFloat32(o + 4, true); pos[v * 3 + 2] = dv.getFloat32(o + 8, true); }
+  }
   const idv = new DataView(ibytes.buffer, ibytes.byteOffset, ibytes.byteLength);
+  const indices = new Uint16Array(icount);
+  for (let k = 0; k < icount; k++) indices[k] = idv.getUint16(k * 2, true);
   const tris = new Float32Array(Math.floor(icount / 3) * 6);
   for (let t = 0, k = 0; t + 2 < icount; t += 3) {
     for (let j = 0; j < 3; j++) {
@@ -147,7 +156,7 @@ function readGeometryUVs(res, gptr) {
       tris[k++] = vi < vcount ? uv[vi * 2 + 1] : NaN;
     }
   }
-  return { tris, vertexCount: vcount, triangleCount: Math.floor(icount / 3) };
+  return { tris, uv, pos, indices, vertexCount: vcount, triangleCount: Math.floor(icount / 3) };
 }
 
 function readModels(res, listHeaderPtr) {

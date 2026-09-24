@@ -67,6 +67,25 @@ function parseName(raw) {
     info.drawableFlag = m[4] || null;
     return finish(info);
   }
+  // Name lost its "ped^" separator (uploads, zips): ig_jayjay_pp_eyes_003, ig_jayjay_uppr_diff_000_a_uni
+  if (!ped && !raw.__noSuffixRetry) {
+    const parts = name.split('_');
+    for (let k = 1; k < parts.length - 1; k++) {
+      const tail = parts.slice(k).join('_');
+      const sub = parseName(Object.assign(new String(tail), { __noSuffixRetry: true }));
+      if (sub.kind === 'unknown') continue;
+      let pedName = parts.slice(0, k).join('_');
+      const comp = sub.component.replace(/^p_/, '');
+      if (sub.prop && PROPS.includes(comp)) return { ...sub, raw, base, ped: pedName, recoveredFrom: base };
+      if (COMPONENTS.includes(comp)) return { ...sub, raw, base, ped: pedName, recoveredFrom: base };
+      // "ig_jayjay_p" + "^" + "p_eyes_003" glued -> "ig_jayjay_pp_eyes_003": the "p_" prefix
+      // merged into the previous token
+      if (PROPS.includes(comp) && pedName.endsWith('p')) {
+        const fixed = parseName(Object.assign(new String('p_' + tail), { __noSuffixRetry: true }));
+        return { ...fixed, raw, base, ped: pedName.slice(0, -1), recoveredFrom: base };
+      }
+    }
+  }
   // generic texture suffix conventions (_n normal, _s spec)
   if (/(_n|_nrm|_normal)$/.test(name)) info.textureType = 'normal';
   else if (/(_s|_spec|_specular)$/.test(name)) info.textureType = 'spec';

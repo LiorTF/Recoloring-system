@@ -7,11 +7,10 @@
 const { decodeMip, encodeMip } = require('../texture/codec');
 const { RECOLORABLE } = require('../formats/texfmt');
 const { SKIN_RACES } = require('../ped/naming');
-const { analyze, apply, publicPlan, accentMap } = require('./recolor');
+const { analyze, apply, publicPlan, designMask } = require('./recolor');
 const { buildProtectMask } = require('./protect');
 const skin = require('../color/skin');
 const M = require('./masks');
-const { paddingFromUV, paddingFromImage } = require('./padding');
 
 /**
  * @typedef {object} TexHandle
@@ -56,10 +55,10 @@ function recolorGroup(members, ctx) {
       rgba: u.rgba0, width: u.w, height: u.h,
       skinMode: useRace ? 'normal' : s.skinMode, skinModel: s.skinModel, raceSkin: useRace,
       lensMode: s.lensMode, uv: s.uv, protectHair: s.protectHair !== false, protectRects: s.protectRects,
+      keepMetal: s.keepMetal, spec: s.spec, lensMeshes: s.lensMeshes,
     });
     u.pm = pm;
-    const pad = paddingFromUV(s.uv && s.uv.used, u.w, u.h) || paddingFromImage(u.rgba0, pm.planes, u.w, u.h);
-    u.pad = pad;
+    u.pad = pm.padding;
   }
 
   // One plan per same-size group (race variants must end up identical on the cloth).
@@ -82,7 +81,7 @@ function recolorGroup(members, ctx) {
       if (li === 0) {
         const planes = cache.planes || u.pm.planes;
         cache.planes = planes;
-        cache.accent = cache.accent || accentMap(planes, mip.width * mip.height, localPlan.materialHues, localPlan.options, mip.width, mip.height);
+        cache.accent = cache.accent || designMask(planes, mip.width * mip.height, localPlan, mip.width, mip.height);
         accentCov = localPlan.options.keepAccents ? M.coverage(cache.accent) : 0;
       }
       const out = apply(src, mip.width, mip.height, prot, localPlan, ctx.color, cache);

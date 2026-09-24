@@ -37,14 +37,20 @@ function looksLikeNormalMap(rgba) {
 }
 
 /** Decide what a texture is: diffuse / normal / spec / palette / other. */
-function classifyTexture(tex, info) {
+function classifyTexture(tex, info, samplerRoles) {
   if (tex.usage === USAGE.TINTPALETTE || /palette/.test(tex.name || '')) return 'palette';
   if (info.textureType) return info.textureType;
+  // Model knowledge: which shader sampler actually reads this texture
+  const role = samplerRoles && samplerRoles.get((tex.name || '').toLowerCase());
+  if (role) return role;
   if (tex.usage === USAGE.NORMAL) return 'normal';
   if (tex.usage === USAGE.SPECULAR) return 'spec';
   const n = (tex.name || '').toLowerCase();
   if (/(^|_)(n|nm|nrm|normal|bump)(_|$)/.test(n) || /_n$/.test(n)) return 'normal';
   if (/(^|_)(s|sp|spec|specular)(_|$)/.test(n) || /_s$/.test(n)) return 'spec';
+  // free-form names (SpecMap, NormalMap, ShoeBump, ...)
+  if (/normal|bump|nrm/.test(n)) return 'normal';
+  if (/spec|gloss|rough/.test(n)) return 'spec';
   if (/(^|_)(e|emissive|em)(_|$)/.test(n)) return 'emissive';
   return 'diffuse';
 }
@@ -131,14 +137,25 @@ async function recolorFiles(inputFiles, opts = {}) {
         const dinfo = diffuse ? parseName(diffuse) : null;
         // A hair shader outside hair/beard slots is just a cut-out material (e.g. shoe foam).
         let role = g.shader ? g.shader.role : 'unknown';
-        const comp = (dnInfo && dnInfo.component) || f.info.component || (dinfo && dinfo.component);
+        const comp = (f.info.kind === 'drawable' && f.info.component) || (dnInfo && dnInfo.component) || (dinfo && dinfo.component);
         if (role === 'hair' && !['hair', 'berd', 'head'].includes(comp)) role = 'cloth';
-        const rec = { role, shader: g.shader ? g.shader.name : null, diffuse, diffuseStem: dinfo && dinfo.stem ? dinfo.stem : null, tris: g.uv.tris, file: f.rel };
-        const stem = (dnInfo && dnInfo.stem) || f.info.stem || (dinfo && dinfo.stem) || null;
+        const rec = { role, shader: g.shader ? g.shader.name : null, diffuse, diffuseStem: dinfo && dinfo.stem ? dinfo.stem : null, tris: g.uv.tris, file: f.rel,
+          mesh: g.uv.pos ? { pos: g.uv.pos, uv: g.uv.uv, indices: g.uv.indices, vertexCount: g.uv.vertexCount } : null };
+        // file name wins (renamed files keep a stale internal name, e.g. p_eyes_003.ydd
+        // holding a drawable hashed "p_eyes_001"); internal name only for single-file peds
+        const stem = (f.info.kind === 'drawable' && f.info.stem) || (dnInfo && dnInfo.stem) || (dinfo && dinfo.stem) || null;
         if (stem) { const k = `${f.ped}|${stem}`; if (!geomsByStem.has(k)) geomsByStem.set(k, []); geomsByStem.get(k).push(rec); }
         if (diffuse) { const k = `${f.ped}|${diffuse}`; if (!geomsByTex.has(k)) geomsByTex.set(k, []); geomsByTex.get(k).push(rec); }
       }
     }
+  }
+
+  // which sampler reads which texture name (BumpSampler -> normal, SpecSampler -> spec)
+  const samplerRoles = new Map();
+  for (const f of files) for (const d of f.drawables || []) for (const sh of d.shaders) {
+    if (!sh) continue;
+    if (sh.bump) samplerRoles.set(sh.bump.toLowerCase(), 'normal');
+    if (sh.spec) samplerRoles.set(sh.spec.toLowerCase(), 'spec');
   }
 
   // ---- collect textures ----
@@ -156,7 +173,7 @@ async function recolorFiles(inputFiles, opts = {}) {
       if (!embedded && f.info.kind === 'texture' && f.textures.length === 1) info = f.info;
       else if (!embedded && !fromTex.component && f.textures.length === 1) info = { ...f.info, textureType: f.info.textureType || fromTex.textureType };
       t.info = info;
-      texs.push({ t, file: owner, embedded, info, ped: info.ped || owner.ped, kind: classifyTexture(t, info) });
+      texs.push({ t, file: owner, embedded, info, ped: info.ped || owner.ped, kind: classifyTexture(t, info, samplerRoles) });
     }
   }
 
@@ -216,6 +233,8 @@ async function recolorFiles(inputFiles, opts = {}) {
       lensMode: policy === 'lens' || hasLensShader,
       uv,
       protectHair: !opts.recolorHair,
+      lensMeshes: (policy === 'lens' && geoms) ? geoms.filter((g) => g.mesh) : null,
+      keepMetal: opts.keepMetal,
       protectRects: (opts.protectRects && (opts.protectRects[name] || opts.protectRects[lower])) || [],
     };
     x.t.formatName = FMT_NAME[x.t.format];
@@ -288,11 +307,11 @@ function processLooseImage(f, { color, opts, report, skinModelFor, preview }) {
   settings.skinModel = settings.skinMode !== 'off' ? skinModelFor(f.ped, info.race || 'uni') : null;
   if (f.ext === '.png') {
     const img = decodePNG(buf);
-    const pm = buildProtectMask({ rgba: img.rgba, width: img.width, height: img.height, ...settings });
-    const { pixels, plan } = recolorRGBA(img.rgba, img.width, img.height, color, { protect: pm.protect, ...(opts.recolor || {}) });
+    const pm = buildProtectMask({ rgba: img.rgba, width: img.width, height: img.height, keepMetal: opts.keepMetal, ...settings });
+    const { pixels, plan } = recolorRGBA(img.rgba, img.width, img.height, color, { protect: pm.protect, ignore: pm.padding ? pm.padding.mask : null, ...(opts.recolor || {}) });
     f.dirtyBuffer = encodePNG(pixels, img.width, img.height);
     if (preview) { preview(f.rel, 'before', img.rgba, img.width, img.height); preview(f.rel, 'after', pixels, img.width, img.height); preview(f.rel, 'protect', pm.protect, img.width, img.height); }
-    report.textures.push({ texture: f.rel, status: 'recolored', protect: pm.coverage, plan });
+    report.textures.push({ texture: f.rel, status: 'recolored', protect: pm.coverage, padding: pm.padding ? pm.padding.source : null, plan });
     return;
   }
   const dds = readDDS(buf);
