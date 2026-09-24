@@ -1,0 +1,24 @@
+{
+  "name": "fivem-recolor",
+  "version": "0.1.0",
+  "description": "Recolor GTA V / FiveM ped & clothing textures (.ytd/.ydd) to one colour while keeping detail, designs, skin, tattoos and lenses intact.",
+  "main": "src/index.js",
+  "bin": {
+    "fivem-recolor": "bin/fivem-recolor.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "recolor": "node bin/fivem-recolor.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "src",
+    "bin",
+    "docs"
+  ],
+  "keywords": ["fivem", "gta5", "ytd", "ydd", "recolor", "texture", "dds", "bc7"],
+  "license": "MIT",
+  "dependencies": {}
+}
