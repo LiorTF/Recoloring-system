@@ -219,3 +219,24 @@ test('mesh lens detection: flat hole-free pane in a different colour than the fr
   assert.ok(res.mask[90 * W + 30] > 0.9, 'lens texels protected');
   assert.ok(res.mask[10 * W + 60] < 0.1, 'frame texels not protected');
 });
+
+test('head props: forward-facing dark visor is a lens even on a black shell; a downward panel is not', () => {
+  const { lensFromMesh } = require('../src/core/lensMesh');
+  const { rgbaToOklabPlanes } = require('../src/color/oklab');
+  const W = 128;
+  // black shell everywhere, a pure-black visor patch at bottom-left, grey liner patch at top-right
+  const tex = image(W, W, (x, y) => (y > 96 && x < 32 ? [0, 0, 0] : (y < 32 && x > 96 ? [110, 110, 110] : [22, 22, 24])));
+  const planes = rgbaToOklabPlanes(tex, W * W);
+  const quad = (pos, uv) => ({ pos: Float32Array.from(pos), uv: Float32Array.from(uv), indices: Uint16Array.from([0, 1, 2, 0, 2, 3]), vertexCount: 4 });
+  // head-bone space: +X up, +Y forward. Visor faces +Y (lies in the XZ plane)
+  const visor = quad([0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1, 1], [0.02, 0.78, 0.22, 0.78, 0.22, 0.98, 0.02, 0.98]);
+  // neck liner faces -X (lies in the YZ plane)
+  const liner = quad([0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1], [0.78, 0.02, 0.98, 0.02, 0.98, 0.22, 0.78, 0.22]);
+  // shell: a dome top facing +X and a side facing +Z (a real shell faces up/sideways)
+  const top = quad([1, 0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1], [0.3, 0.3, 0.5, 0.3, 0.5, 0.5, 0.3, 0.5]);
+  const side = quad([0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1], [0.5, 0.5, 0.7, 0.5, 0.7, 0.7, 0.5, 0.7]);
+  const res = lensFromMesh([{ mesh: visor }, { mesh: liner }, { mesh: top }, { mesh: side }], planes, W, W, { forwardAxis: [0, 1, 0] });
+  assert.ok(res, 'visor found');
+  assert.ok(res.mask[110 * W + 10] > 0.9, 'visor texels protected');
+  assert.ok(res.mask[10 * W + 110] < 0.1, 'neck liner is not a lens');
+});

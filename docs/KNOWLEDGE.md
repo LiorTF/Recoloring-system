@@ -236,6 +236,15 @@ shape tests (comparing against "everything else" made a white bevel look like a 
 big UV area dragged the average black). Only texels of the lens colour are masked. Guard: lenses are a
 handful of triangles (2 × 24 of 9 712 here) – if > 50 % of triangles look like lens, ignore.
 
+**Head-prop orientation + visors** (real full-face helmet `p_head_005`): props on SKEL_Head are in
+head-bone space, **+X up, +Y forward** (measured: glasses lenses at y≈+0.12 facing ±Y; helmet
+x −0.09…0.22 tall). For p_head / p_eyes / p_mouth / berd a lens must face ±Y (≥ 0.6); this rejects the
+flat grey **neck-opening liner** that otherwise passes every shape test. Visors wrap around (coherence
+~0.7) and are often **UV-collapsed onto a tiny solid patch** (595 texels), so forward-facing panes get
+a looser flatness bound, no minimum UV area, and a *dark tinted pane* (L < 0.12) counts as a visor even
+when it matches a black shell. Many exporters write **unwelded** meshes (this helmet: 2554 one-triangle
+"pieces") – vertices are welded by position + UV before finding pieces (also made it 15× faster).
+
 ### Print ink (`extendWithInk` in `src/core/recolor.js`)
 A coloured print is usually colour + black ink (pink letters with black fill/outlines, flames).
 Keeping only the colour and tinting the black ink lifts it to grey-brown and the print reads as
@@ -270,8 +279,8 @@ because distressed prints are mostly faint speckled colour (measured C 0.02–0.
   renamed `a_m_y_runner_01`): head/teeth/hair untouched, bare-hands texture fully protected by the
   ped skin model, suit/shirt/tie keep tonal separation; resource flags + system segment byte-identical,
   every non-recolored texture byte-identical.
-* `npm test` (8 tests): synthetic peds (skin + tattoo + khaki strip + tinted lens, race variants),
-  UV padding vs flat garment, print ink vs shadow, mesh lens vs frame.
+* `npm test` (9 tests): synthetic peds (skin + tattoo + khaki strip + tinted lens, race variants),
+  UV padding vs flat garment, print ink vs shadow, mesh lens vs frame, visor vs neck liner.
 * The author's own textures (skeleton tee, WrestleMania tank, leather tracksuit with chrome hardware,
   two-tone hoodie, grey set with pink/black grunge prints) and ig_jayjay's `p_eyes_003` glasses
   (.ydd + .ytd): hardware kept chrome, prints keep pink + black, lenses kept from the mesh.

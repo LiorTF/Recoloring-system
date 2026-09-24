@@ -122,7 +122,7 @@ function buildProtectMask(p) {
     if (a) { parts.lensAlpha = a; M.maxInto(protect, a); }
   }
   if (p.lensMode && p.lensMeshes && p.lensMeshes.length) {
-    const lm = lensFromMesh(p.lensMeshes, planes, w, h);
+    const lm = lensFromMesh(p.lensMeshes, planes, w, h, { forwardAxis: p.lensForward || null });
     if (lm) { parts.lensMesh = lm.mask; parts.lensPieces = lm.pieces; M.maxInto(protect, lm.mask); }
   }
   if (p.uv) {

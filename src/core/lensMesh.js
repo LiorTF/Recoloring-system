@@ -13,16 +13,33 @@
  */
 const M = require('./masks');
 
-function components(indices, vcount) {
+/**
+ * Weld vertices that share position AND UV (many exporters write every triangle with its own
+ * vertices – a real helmet came in as 2554 one-triangle "pieces"). Returns a vertex -> id map.
+ */
+function weldMap(pos, uv, vcount) {
+  const ids = new Int32Array(vcount);
+  const seen = new Map();
+  const q = (v) => Math.round(v * 1e4);
+  for (let v = 0; v < vcount; v++) {
+    const key = `${q(pos[v * 3])},${q(pos[v * 3 + 1])},${q(pos[v * 3 + 2])},${q(uv[v * 2])},${q(uv[v * 2 + 1])}`;
+    let id = seen.get(key);
+    if (id === undefined) { id = v; seen.set(key, v); }
+    ids[v] = id;
+  }
+  return ids;
+}
+
+function components(indices, vcount, weld) {
   const parent = new Int32Array(vcount).map((_, i) => i);
   const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
   for (let t = 0; t + 2 < indices.length; t += 3) {
-    const a = find(indices[t]), b = find(indices[t + 1]), c = find(indices[t + 2]);
+    const a = find(weld[indices[t]]), b = find(weld[indices[t + 1]]), c = find(weld[indices[t + 2]]);
     parent[b] = a; parent[find(c)] = a;
   }
   const byRoot = new Map();
   for (let t = 0; t + 2 < indices.length; t += 3) {
-    const r = find(indices[t]);
+    const r = find(weld[indices[t]]);
     if (!byRoot.has(r)) byRoot.set(r, []);
     byRoot.get(r).push(t);
   }
@@ -34,12 +51,12 @@ function components(indices, vcount) {
  * @param {{L:Float32Array,A:Float32Array,B:Float32Array}} planes  texture in OKLab
  * @returns {{mask:Float32Array, pieces:object[]}|null}
  */
-function lensFromMesh(geoms, planes, w, h, { minCoherence = 0.75, maxHoleFrac = 0.06, maxAspect = 3.2, maxStd = 0.06, minContrast = 0.12, minUV = 0.002, debug = false } = {}) {
+function lensFromMesh(geoms, planes, w, h, { minCoherence = 0.75, maxHoleFrac = 0.06, maxAspect = 3.2, maxStd = 0.06, minContrast = 0.12, minUV = 0.002, debug = false, forwardAxis = null, minForward = 0.6 } = {}) {
   const n = w * h;
   const pieces = [];
   for (const g of geoms) {
     const m = g.mesh; if (!m || !m.pos || !m.indices) continue;
-    for (const tris of components(m.indices, m.vertexCount)) {
+    for (const tris of components(m.indices, m.vertexCount, weldMap(m.pos, m.uv, m.vertexCount))) {
       let nx = 0, ny = 0, nz = 0, area = 0;
       const uvTris = new Float32Array(tris.length * 6);
       tris.forEach((t, k) => {
@@ -52,8 +69,10 @@ function lensFromMesh(geoms, planes, w, h, { minCoherence = 0.75, maxHoleFrac = 
       });
       if (area <= 0) continue;
       const coherence = Math.hypot(nx, ny, nz) / area;
+      // how much the pane faces the prop's forward axis (head props: +Y in head-bone space)
+      const facing = forwardAxis ? Math.abs(nx * forwardAxis[0] + ny * forwardAxis[1] + nz * forwardAxis[2]) / (Math.hypot(nx, ny, nz) || 1) : 1;
       const island = M.rasterizeUVTriangles(uvTris, w, h);
-      pieces.push({ triangles: tris.length, coherence, island });
+      pieces.push({ triangles: tris.length, coherence, facing, island });
     }
   }
   if (pieces.length < 2) return null;
@@ -78,7 +97,13 @@ function lensFromMesh(geoms, planes, w, h, { minCoherence = 0.75, maxHoleFrac = 
   for (const p of pieces) {
     p.uvCov = p.island.reduce((x, v) => x + v, 0);
     p.shapeOk = false;
-    if (p.uvCov < n * minUV || p.coherence < minCoherence) continue;
+    // a lens/visor looks FORWARD; a flat panel facing down (neck liner) or sideways is not one.
+    // Visors wrap around (less flat than a glasses lens) and are often UV-collapsed onto a tiny
+    // solid patch, so forward-facing pieces get a looser flatness bound and no minimum UV area.
+    const forwardPane = !!forwardAxis && p.facing >= 0.85;
+    const minCoh = forwardPane ? Math.min(minCoherence, 0.6) : minCoherence;
+    if (p.uvCov < (forwardPane ? 16 : n * minUV) || p.coherence < minCoh || p.facing < minForward) continue;
+    p.forwardPane = forwardPane;
     const filled = M.fillHoles(p.island, w, h, n);
     const fcov = filled.reduce((x, v) => x + v, 0);
     p.holeFrac = (fcov - p.uvCov) / fcov;
@@ -100,7 +125,10 @@ function lensFromMesh(geoms, planes, w, h, { minCoherence = 0.75, maxHoleFrac = 
     const st = stat(M.erode(p.island, w, h, 2)) || stat(p.island);
     p.std = st.std;
     p.contrast = fs ? Math.hypot(st.L - fs.L, st.A - fs.A, st.B - fs.B) : 1;
-    p.lens = p.std <= maxStd && p.contrast >= minContrast;
+    p.L = st.L;
+    // tinted visor: forward pane in one very dark colour – it may match a black shell exactly
+    const darkVisor = p.forwardPane && st.L < 0.12;
+    p.lens = p.std <= maxStd && (p.contrast >= minContrast || darkVisor);
     if (p.lens) {
       lensTris += p.triangles;
       // only texels that actually carry the lens colour: an island can graze the frame
