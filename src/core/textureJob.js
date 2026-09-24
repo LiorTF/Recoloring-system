@@ -77,11 +77,11 @@ function recolorGroup(members, ctx) {
       const mip = t.mips[li];
       const src = li === 0 ? u.rgba0 : decodeMip(t.format, original.subarray(mip.offset, mip.offset + mip.size), mip.width, mip.height);
       const prot = li === 0 ? u.pm.protect : M.resizeMask(u.pm.protect, u.w, u.h, mip.width, mip.height);
-      const cache = li === 0 && localPlan === plan && u === primary ? { planes: plan._planes, accent: plan._accent } : {};
+      const cache = li === 0 && localPlan === plan && u === primary ? { planes: plan._planes } : {};
       if (li === 0) {
         const planes = cache.planes || u.pm.planes;
         cache.planes = planes;
-        cache.accent = cache.accent || designMask(planes, mip.width * mip.height, localPlan, mip.width, mip.height);
+        cache.accent = cache.accent || designMask(planes, mip.width * mip.height, localPlan, mip.width, mip.height, ctx.color);
         accentCov = localPlan.options.keepAccents ? M.coverage(cache.accent) : 0;
       }
       const out = apply(src, mip.width, mip.height, prot, localPlan, ctx.color, cache);

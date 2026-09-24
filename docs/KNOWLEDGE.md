@@ -274,7 +274,12 @@ Keeping only the colour and tinting the black ink lifts it to grey-brown and the
   "inkness" = edge activity (thin strokes/flames) OR near-pure black (solid ink).
 A smooth dark-grey shadow fold touching a logo passes none of these. Enclosed texels must also differ
 from the fabric (a red crosshair ring on a black hoodie encloses black *fabric*; keeping it left a
-black blob in-game).
+black blob in-game). Fabric-tone texels enclosed by a print are only kept as **distress specks**
+(fabric showing through grunge ink): small (≤ 0.005 % of the texture) AND walled mostly by neutral ink
+rather than by the coloured lines (crosshair compartments are walled by red). White ink only counts when
+the fabric itself isn't white (on a white hoodie it grew into a white patch next to the ribs – reported),
+and ink is only kept where the tone curve would visibly move it (≥ 0.1 L): white ribs that end up
+near-white anyway must not be kept pure white next to cream-tinted ribs.
 Accents themselves grow by hysteresis (confident seeds → connected same-hue texels down to C 0.02),
 because distressed prints are mostly faint speckled colour (measured C 0.02–0.08).
 

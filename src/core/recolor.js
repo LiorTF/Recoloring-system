@@ -35,6 +35,9 @@ const DEFAULTS = Object.freeze({
   inkMinContrast: 0.18,       // ink must differ this much (OKLab L) from the fabric base
   inkMaxShare: 0.03,          // bigger neutral regions are fabric panels, not ink
   inkMinEdge: 0.12,
+  inkMinShift: 0.1,
+  enclosedFabricTol: 0.08,
+  distressSpeckMax: 0.00005,  // fabric-tone specks inside a print up to this share (~200 px at 2k) are print distress    // enclosed texels this close to the fabric base tone are fabric, not ink           // keep neutral ink only if the recolor would move its lightness this much
   inkReach: 0.06,
   enclosedMaxShare: 0.03,     // regions fully enclosed by the coloured print (letter interiors) up to this share
   inkBlobMaxShare: 0.002,     // whole sharp-edged ink blobs touching the print are kept up to this share            // geodesic reach of ink from the coloured print (fraction of texture size)           // median OKLab L step across the ink border (print = sharp, shading = soft)     // accents grow from confident seeds into connected same-hue texels down to this chroma
@@ -201,16 +204,21 @@ function accentMap(planes, n, materialHues, o, width, height) {
  * accent and is print-sized. On a black garment black is not "different from the
  * fabric", so a logo there never drags the fabric along.
  */
-function extendWithInk(accent, planes, w, h, baseL, o) {
+function extendWithInk(accent, planes, w, h, baseL, o, lut = null) {
   if (!w || !h) return accent;
   const n = w * h;
   const { L, A, B } = planes;
+  const shift = (v) => { if (!lut) return 1; const sz = lut.length - 1; return Math.abs(lut[Math.min(sz, Math.max(0, Math.round(v * sz)))] - v); };
   const ink = new Uint8Array(n);
   for (let i = 0; i < n; i++) {
     if (accent[i] >= 0.5) continue;
     if (Math.hypot(A[i], B[i]) > o.inkMaxChroma) continue;
     // ink is dark (or near-white) – mid/light greys next to a logo are fabric highlights
-    if ((L[i] <= baseL - o.inkMinContrast && L[i] < 0.32) || L[i] >= 0.92) ink[i] = 1;
+    // white ink only counts when the FABRIC is not white itself: on a white hoodie the white
+    // around a red crosshair is fabric (keeping it left a white patch next to the print)
+    if (!((L[i] <= baseL - o.inkMinContrast && L[i] < 0.32) || (L[i] >= 0.92 && L[i] >= baseL + o.inkMinContrast))) continue;
+    if (shift(L[i]) < o.inkMinShift) continue; // recolor keeps it looking the same anyway
+    ink[i] = 1;
   }
   const { labels, sizes, count } = M.label(ink, w, h, 1);
   const touch = new Uint8Array(count);
@@ -286,9 +294,31 @@ function extendWithInk(accent, planes, w, h, baseL, o) {
   const filled = M.fillHoles(bridged, w, h, Math.round(n * o.enclosedMaxShare));
   // ...but only texels that are NOT the fabric itself: a red crosshair ring on a black hoodie
   // encloses black FABRIC, which must be recolored with the rest (it left a black blob)
+  // Enclosed texels at the fabric's own tone are either FABRIC (the black hoodie inside a red
+  // crosshair ring – one solid area, must be recolored) or DISTRESS specks (fabric showing
+  // through grunge ink – tiny, part of the print). Tone can't tell them apart; size can.
+  const fabricTone = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    if (filled[i] && !seed[i] && Math.abs(L[i] - baseL) < o.enclosedFabricTol && Math.hypot(A[i], B[i]) <= o.inkMaxChroma) fabricTone[i] = 1;
+  }
+  const speckMax = Math.max(12, Math.round(n * o.distressSpeckMax));
+  const ft = M.label(fabricTone, w, h, 1);
+  // ...and a distress speck sits in NEUTRAL INK; the compartments of a crosshair are walled by
+  // the coloured lines themselves (keeping those left a black dot inside the crosshair)
+  const inkWall = new Int32Array(ft.count), colWall = new Int32Array(ft.count);
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x, l = ft.labels[i];
+    if (l < 0 || ft.sizes[l] > speckMax) continue;
+    for (const q of [i - 1, i + 1, i - w, i + w]) {
+      if (fabricTone[q]) continue;
+      if (seed[q]) colWall[l]++;
+      else if (Math.abs(L[q] - baseL) >= o.inkMinContrast && Math.hypot(A[q], B[q]) <= o.inkMaxChroma) inkWall[l]++;
+    }
+  }
   for (let i = 0; i < n; i++) {
     if (!filled[i] || seed[i] || out[i] >= 1) continue;
-    if (Math.abs(L[i] - baseL) < o.inkMinContrast && Math.hypot(A[i], B[i]) <= o.inkMaxChroma) continue;
+    if (fabricTone[i]) { const l = ft.labels[i]; if (ft.sizes[l] > speckMax || inkWall[l] <= colWall[l]) continue; } // enclosed fabric
+    if (!fabricTone[i] && Math.hypot(A[i], B[i]) <= o.inkMaxChroma && shift(L[i]) < o.inkMinShift) continue;
     out[i] = 1; added++;
   }
   if (!added) return accent;
@@ -296,10 +326,19 @@ function extendWithInk(accent, planes, w, h, baseL, o) {
 }
 
 /** Full kept-design mask for any mip level: coloured accents + their neutral ink. */
-function designMask(planes, n, plan, width, height) {
+function designMask(planes, n, plan, width, height, color) {
   const o = plan.options;
   const acc = accentMap(planes, n, plan.materialHues, o, width, height);
-  return o.keepAccents && o.keepPrintInk ? extendWithInk(acc, planes, width, height, plan.baseL, o) : acc;
+  if (!(o.keepAccents && o.keepPrintInk)) return acc;
+  // with the target known: only ink the tone curve would visibly CHANGE needs keeping.
+  // Black ink turning brown on a grey hoodie – yes; white ribs that come out near-white
+  // anyway – no (keeping them pure white next to cream-tinted ribs made a visible patch)
+  let lut = null;
+  if (color) {
+    const target = Array.isArray(color) && color.length === 3 && color[0] <= 1.5 ? color : srgb8ToOklab(...parseHex(color));
+    lut = buildToneCurve(plan.modes && plan.modes.length ? plan.modes : [{ Lb: plan.baseL, down: 0.05, up: 0.05, share: 1 }], target[0], o);
+  }
+  return extendWithInk(acc, planes, width, height, plan.baseL, o, lut);
 }
 
 /**
@@ -472,7 +511,7 @@ function apply(rgba, width, height, protect, plan, color, cache = {}) {
   const o = plan.options;
   const target = Array.isArray(color) && color.length === 3 && color[0] <= 1.5 ? color : srgb8ToOklab(...parseHex(color));
   const planes = cache.planes || rgbaToOklabPlanes(rgba, n);
-  const accent = cache.accent || designMask(planes, n, plan, width, height);
+  const accent = cache.accent || designMask(planes, n, plan, width, height, target);
   const tint = makeTinter(plan, target);
   const lab = [0, 0, 0], rgb = new Uint8Array(3);
   const memo = new Map();
@@ -506,7 +545,7 @@ function recolorRGBA(rgba, width, height, color, { protect = null, ignore = unde
     ignore = pad ? pad.mask : null;
   }
   const plan = analyze(rgba, width, height, protect, options, { ignore });
-  const pixels = apply(rgba, width, height, protect, plan, color, { planes: plan._planes, accent: plan._accent });
+  const pixels = apply(rgba, width, height, protect, plan, color, { planes: plan._planes });
   return { pixels, plan: publicPlan(plan) };
 }
 
