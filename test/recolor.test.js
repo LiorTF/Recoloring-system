@@ -158,3 +158,20 @@ test('race variants: skin found by diffing _whi vs _bla, cloth identical across 
   let d = 0; for (let i = 128 * 60; i < 128 * 128; i++) d += Math.abs(a0[i * 4] - a1[i * 4]);
   assert.ok(d / (128 * 68) < 1.5, 'the same cloth must come out identical for every skin tone');
 });
+
+test('UV padding is ignored, but a flat black garment with a flat print is still the garment', () => {
+  const w = 128, h = 128;
+  const r = rng(21);
+  // shaded dark-grey shirt island on flat black padding
+  const padded = image(w, h, (x, y) => (x > 20 && x < 108 && y > 20 && y < 108 ? [50 + Math.sin(x / 5) * 12 + (r() - 0.5) * 10, 50 + Math.sin(x / 5) * 12, 52, 255].map(Math.round) : [0, 0, 0, 255]));
+  const a = recolorRGBA(padded, w, h, TARGET).pixels;
+  const island = [];
+  for (let y = 30; y < 98; y++) for (let x = 30; x < 98; x++) island.push(dE(labAt(a, y * w + x), T_LAB));
+  assert.ok(median(island) < 0.04, `shirt island should sit on the target, dE ${median(island)}`);
+
+  // flat black tee with a flat white print: the black IS the fabric
+  const tee = image(w, h, (x, y) => ((x - 64) ** 2 + (y - 64) ** 2 < 20 ** 2 ? [255, 255, 255, 255] : [0, 0, 0, 255]));
+  const b = recolorRGBA(tee, w, h, TARGET).pixels;
+  assert.ok(dE(labAt(b, 5), T_LAB) < 0.03, 'black fabric -> target');
+  assert.ok(labAt(b, 64 * w + 64)[0] > labAt(b, 5)[0] + 0.1, 'white print stays lighter');
+});

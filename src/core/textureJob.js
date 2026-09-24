@@ -11,6 +11,7 @@ const { analyze, apply, publicPlan, accentMap } = require('./recolor');
 const { buildProtectMask } = require('./protect');
 const skin = require('../color/skin');
 const M = require('./masks');
+const { paddingFromUV, paddingFromImage } = require('./padding');
 
 /**
  * @typedef {object} TexHandle
@@ -57,16 +58,18 @@ function recolorGroup(members, ctx) {
       lensMode: s.lensMode, uv: s.uv, protectHair: s.protectHair !== false, protectRects: s.protectRects,
     });
     u.pm = pm;
+    const pad = paddingFromUV(s.uv && s.uv.used, u.w, u.h) || paddingFromImage(u.rgba0, pm.planes, u.w, u.h);
+    u.pad = pad;
   }
 
   // One plan per same-size group (race variants must end up identical on the cloth).
   const primary = usable.slice().sort((a, b) => M.coverage(a.pm.protect) - M.coverage(b.pm.protect))[0];
-  const plan = analyze(primary.rgba0, primary.w, primary.h, primary.pm.protect, ctx.options);
+  const plan = analyze(primary.rgba0, primary.w, primary.h, primary.pm.protect, ctx.options, { ignore: primary.pad && primary.pad.mask });
 
   for (const u of usable) {
     const t = u.t;
-    const localPlan = (u.w === primary.w && u.h === primary.h) ? plan : analyze(u.rgba0, u.w, u.h, u.pm.protect, ctx.options);
-    const report = { texture: t.name, format: t.formatName, size: `${u.w}x${u.h}`, mips: t.mips.length, status: 'recolored', protect: u.pm.coverage, skinSource: u.pm.parts.skinSource || null, plan: publicPlan(localPlan) };
+    const localPlan = (u.w === primary.w && u.h === primary.h) ? plan : analyze(u.rgba0, u.w, u.h, u.pm.protect, ctx.options, { ignore: u.pad && u.pad.mask });
+    const report = { texture: t.name, format: t.formatName, size: `${u.w}x${u.h}`, mips: t.mips.length, status: 'recolored', protect: u.pm.coverage, skinSource: u.pm.parts.skinSource || null, padding: u.pad ? { source: u.pad.source, coverage: +M.coverage(u.pad.mask).toFixed(3) } : null, plan: publicPlan(localPlan) };
     if (localPlan.empty) { report.status = 'skipped'; report.reason = 'no recolorable texels (fully protected)'; reports.push(report); continue; }
 
     const original = Uint8Array.from(t.data); // for bit-exact alpha copy + preview

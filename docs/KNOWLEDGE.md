@@ -110,7 +110,14 @@ UVs are D3D convention (v down = texture rows), may exceed 0..1 (wrap).
    (average ≈ (128,128,255) = normal map) third.
 6. **Non-power-of-two sizes with 1 mip** (2136x2136, 1244x1224) are common in add-on packs – supported.
 7. File names in the wild: `...^'jbib_diff_008_c_uni.ytd` (stray quote), `..._b_uni .ytd` (space) – tolerated.
-8. A watch prop had a real `ped_alpha` geometry covering a tiny UV patch = the watch glass. That's
+8. **UV padding pollutes the analysis.** Hand-made textures often have 20–75 % flat black space between
+   UV islands. Counted as fabric it becomes the "dominant material", so a dark-grey shirt got mapped
+   lighter than the target and its white print blew out. Fix (`src/core/padding.js`): with the .ydd,
+   texels outside every UV island are excluded from analysis (still recolored). Image-only fallback: a
+   perfectly flat border-connected fill (local L std ≈ 0) is padding **only if the rest looks like
+   shaded cloth** (median local std ≥ 0.003). Measured on the author's textures: shaded garments
+   0.008–0.019, a flat black tee with a flat white skeleton print 0.00007 → there the black is the shirt.
+9. A watch prop had a real `ped_alpha` geometry covering a tiny UV patch = the watch glass. That's
    exactly the "lens" signal we use.
 
 ---
@@ -123,7 +130,7 @@ Why naive methods fail: hue shift does nothing on black/white/grey; multiply kee
 All math is in **OKLab** (perceptually uniform: a lightness step looks the same on dark and light fabric).
 Target `#d3ac92` = OKLab L 0.773, a 0.033, b 0.048 (chroma 0.058, hue 55°).
 
-1. **Cloth texels** = not protected and alpha ≥ 16.
+1. **Cloth texels** = not protected, alpha ≥ 16, and not UV padding (see gotcha 8).
 2. **Material hues**: hue histogram of chromatic cloth texels (C ≥ 0.045); peaks covering ≥ 8 %
    are *materials*.
 3. **Accents (the design)**: chromatic texels whose hue is > ~32° away from every material hue

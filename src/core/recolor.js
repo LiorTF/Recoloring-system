@@ -63,7 +63,7 @@ function weightedMedian(values, weights, n) {
  * @param {Uint8Array} rgba
  * @param {Float32Array|null} protect 0..1 per texel (1 = never recolor)
  */
-function analyze(rgba, width, height, protect, options = {}) {
+function analyze(rgba, width, height, protect, options = {}, { ignore = null } = {}) {
   const o = { ...DEFAULTS, ...options };
   const n = width * height;
   const planes = rgbaToOklabPlanes(rgba, n);
@@ -76,7 +76,8 @@ function analyze(rgba, width, height, protect, options = {}) {
   const w = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     const p = protect ? protect[i] : 0;
-    if (p >= 0.5 || rgba[i * 4 + 3] < 16) continue;
+    // `ignore` = UV padding: still recolored, but never allowed to define the fabric
+    if (p >= 0.5 || rgba[i * 4 + 3] < 16 || (ignore && ignore[i])) continue;
     w[i] = 1; cloth++;
     const C = Math.hypot(A[i], B[i]);
     if (C >= o.accentMinChroma) {
@@ -355,8 +356,13 @@ function apply(rgba, width, height, protect, plan, color, cache = {}) {
 }
 
 /** One-shot convenience: analyse + apply at a single resolution. */
-function recolorRGBA(rgba, width, height, color, { protect = null, ...options } = {}) {
-  const plan = analyze(rgba, width, height, protect, options);
+function recolorRGBA(rgba, width, height, color, { protect = null, ignore = undefined, ...options } = {}) {
+  if (ignore === undefined) {
+    const { paddingFromImage } = require('./padding');
+    const pad = paddingFromImage(rgba, rgbaToOklabPlanes(rgba, width * height), width, height);
+    ignore = pad ? pad.mask : null;
+  }
+  const plan = analyze(rgba, width, height, protect, options, { ignore });
   const pixels = apply(rgba, width, height, protect, plan, color, { planes: plan._planes, accent: plan._accent });
   return { pixels, plan: publicPlan(plan) };
 }
