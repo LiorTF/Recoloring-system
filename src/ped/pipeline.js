@@ -234,6 +234,7 @@ async function recolorFiles(inputFiles, opts = {}) {
       uv,
       protectHair: !opts.recolorHair,
       lensMeshes: (policy === 'lens' && geoms) ? geoms.filter((g) => g.mesh) : null,
+      meshes: geoms ? geoms.filter((g) => g.mesh) : null,
       // props on SKEL_Head are modelled in head-bone space: +X up, +Y forward (measured on
       // real glasses + a full-face helmet). Lenses/visors face forward; neck liners don't.
       lensForward: ['p_head', 'p_eyes', 'p_mouth', 'berd'].includes(comp) ? [0, 1, 0] : null,

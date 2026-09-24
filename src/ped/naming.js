@@ -86,6 +86,29 @@ function parseName(raw) {
       }
     }
   }
+  // Separator dropped with NO underscore: "ig_jayjayhand_002_u", "ig_jayjayjbib_diff_008_a_uni".
+  // Find the right-most component/prop name that starts a valid tail.
+  if (!ped && !raw.__noSuffixRetry) {
+    const names = [...COMPONENTS, ...PROPS.map((p) => 'p_' + p)].sort((a, b) => b.length - a.length);
+    let best = null;
+    for (const c of names) {
+      let idx = name.lastIndexOf(c + '_');
+      while (idx > 0) {
+        const sub = parseName(Object.assign(new String(name.slice(idx)), { __noSuffixRetry: true }));
+        if (sub.kind !== 'unknown' && (!best || idx > best.idx)) { best = { idx, sub }; break; }
+        idx = name.lastIndexOf(c + '_', idx - 1);
+      }
+    }
+    // "..._p_head_005": the right-most hit is "head", but "p_head" is the prop
+    if (best && name.slice(best.idx - 2, best.idx) === 'p_' && PROPS.includes(best.sub.component)) {
+      const sub = parseName(Object.assign(new String(name.slice(best.idx - 2)), { __noSuffixRetry: true }));
+      if (sub.kind !== 'unknown') best = { idx: best.idx - 2, sub };
+    }
+    if (best) {
+      let pedName = name.slice(0, best.idx).replace(/[_^]+$/, '');
+      return { ...best.sub, raw, base, ped: pedName || null, recoveredFrom: base };
+    }
+  }
   // generic texture suffix conventions (_n normal, _s spec)
   if (/(_n|_nrm|_normal)$/.test(name)) info.textureType = 'normal';
   else if (/(_s|_spec|_specular)$/.test(name)) info.textureType = 'spec';

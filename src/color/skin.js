@@ -182,4 +182,91 @@ function cleanSkinMask(score, w, h, { strict = false, tattooHoleFrac = 0.03 } = 
   return M.boxBlur(M.toFloat(m), w, h, 1);
 }
 
-module.exports = { genericSkinScore, genericSkinScoreLab, buildSkinModel, skinScoreMap, raceDiffMask, cleanSkinMask, mahalanobis };
+/**
+ * Tattooed skin, island by island (model knowledge). A full-sleeve tattoo leaves too little
+ * clean skin to "enclose" the ink, so the pixel skin mask misses most of it. But a leg / arm
+ * is its own mesh piece with its own UV island: if the island shows a real share of THIS ped's
+ * skin and almost everything else in it is darker than that skin (ink), the whole island is
+ * tattooed skin. A shorts / sleeve panel has no skin in it and is left alone.
+ * @param {Array<{island:Uint8Array, area:number}>} islands
+ * @param {Float32Array} score  per-texel skin score
+ */
+function tattooedIslands(islands, score, planes, rgba, w, h, { minSkin = 0.08, maxFabric = 0.15, minArea = 0.001 } = {}) {
+  const n = w * h;
+  const out = new Uint8Array(n);
+  const found = [];
+  for (const isl of islands) {
+    if (isl.area < n * minArea) continue;
+    const skinL = [];
+    let total = 0, skinCount = 0;
+    for (let i = 0; i < n; i++) {
+      if (!isl.island[i] || rgba[i * 4 + 3] < 16) continue;
+      total++;
+      if (score[i] >= 0.5) { skinCount++; if (skinL.length < 50000) skinL.push(planes.L[i]); }
+    }
+    if (!total || skinCount / total < minSkin) continue;
+    skinL.sort((a, b) => a - b);
+    const Ls = skinL[Math.floor(skinL.length * 0.25)]; // darker end of the visible skin
+    // "fabric-like" = not skin, and as light as the skin or lighter (ink is darker)
+    let fabric = 0;
+    for (let i = 0; i < n; i++) {
+      if (!isl.island[i] || rgba[i * 4 + 3] < 16 || score[i] >= 0.5) continue;
+      if (planes.L[i] >= Ls - 0.02) fabric++;
+    }
+    const fabricFrac = fabric / total;
+    if (fabricFrac > maxFabric) continue;
+    for (let i = 0; i < n; i++) if (isl.island[i]) out[i] = 1;
+    found.push({ area: isl.area, skin: +(skinCount / total).toFixed(3), fabric: +fabricFrac.toFixed(3) });
+  }
+  if (!found.length) return null;
+  return { mask: M.boxBlur(M.toFloat(M.dilate(out, w, h, 2)), w, h, 1), islands: found };
+}
+
+/**
+ * Pixel-level fallback when leg + shorts are ONE mesh piece: ink regions (darker than this
+ * ped's skin) that are interleaved with skin – most of the region has skin within a few
+ * texels, like a sleeve showing skin between its lines – are tattoos. A black shorts panel
+ * only meets skin along its hem, so it fails the interleave test.
+ */
+function inkOnSkin(skinMask, score, planes, rgba, w, h, { reachFrac = 0.05, minDensity = 0.1 } = {}) {
+  const n = w * h;
+  // RAW skin detections (minus lone specks): the cleaned mask drops exactly the small skin
+  // fragments a dense sleeve leaves between its lines
+  const raw = new Uint8Array(n);
+  for (let i = 0; i < n; i++) raw[i] = (score[i] >= 0.5 || skinMask[i] >= 0.5) && rgba[i * 4 + 3] >= 16 ? 1 : 0;
+  const skinBin = M.removeSmall(raw, w, h, 6);
+  const Ls = [];
+  for (let i = 0; i < n; i += 3) if (skinBin[i] && score[i] >= 0.5) Ls.push(planes.L[i]);
+  if (Ls.length < 200) return null;
+  Ls.sort((a, b) => a - b);
+  const L25 = Ls[Math.floor(Ls.length * 0.25)];
+  const ink = new Uint8Array(n);
+  for (let i = 0; i < n; i++) if (!skinBin[i] && rgba[i * 4 + 3] >= 16 && planes.L[i] < L25 - 0.03) ink[i] = 1;
+  // measured on a dense sleeve: >= 4% of the texture bridges the skin gaps; closing never
+  // spills past the hem at any radius. Capped so 2k textures stay fast.
+  const r = Math.min(64, Math.max(3, Math.round(Math.max(w, h) * reachFrac)));
+  // Per texel, not per region (sleeve ink often touches dark shorts at the hem and merges
+  // with them). CLOSING the skin mask joins the skin showing between the lines into one body
+  // area covering the sleeve – and, unlike a blur/density window, closing never grows past
+  // the outermost skin, so it stops exactly at the hem. Big solid ink fills inside that
+  // area are enclosed holes.
+  let body = M.close(skinBin, w, h, r);
+  body = M.fillHoles(body, w, h, Math.round(n * 0.03));
+  // a real sleeve: the body area must be mostly skin + ink, not a skin-coloured speck field
+  let bodyN = 0, bodySkin = 0;
+  for (let i = 0; i < n; i++) if (body[i]) { bodyN++; if (skinBin[i]) bodySkin++; }
+  if (!bodyN || bodySkin / bodyN < minDensity) return null;
+  const out = new Uint8Array(n);
+  let kept = 0;
+  // inside the closed skin area every texel is skin or tattoo – including WHITE ink and
+  // coloured (red/blue) ink that is not darker than the skin
+  for (let i = 0; i < n; i++) if (body[i] && rgba[i * 4 + 3] >= 16 && !skinBin[i]) { out[i] = 1; kept++; }
+  if (!kept) return null;
+  // the skin showing between the kept ink belongs to the tattoo too
+  const around = M.dilate(out, w, h, r);
+  for (let i = 0; i < n; i++) if (skinBin[i] && around[i]) out[i] = 1;
+  const closed = M.close(out, w, h, 2);
+  return { mask: M.boxBlur(M.toFloat(M.dilate(closed, w, h, 1)), w, h, 1), kept };
+}
+
+module.exports = { inkOnSkin, tattooedIslands, genericSkinScore, genericSkinScoreLab, buildSkinModel, skinScoreMap, raceDiffMask, cleanSkinMask, mahalanobis };

@@ -199,6 +199,22 @@ Policy (`skin: 'auto'`): race textures → normal detection; `_uni` → strict; 
 Tattoos (dark ink) aren't skin-coloured, so they are recovered as **holes enclosed by skin**
 (`fillHoles`, up to 3 % of the texture), plus the race-diff catches them directly.
 
+**Full sleeves** (reported on ig_jayjay's legs/arms: ink covers most of the limb, skin only shows
+between the lines, with red and white ink) defeat the hole rule – there is too little clean skin to
+enclose anything, and the cleaned skin mask drops the small skin fragments. Two extra layers:
+1. **Mesh islands** (`tattooedIslands`): each welded mesh piece has its own UV island. An island with
+   ≥ 8 % of this ped's skin whose remaining texels are almost all darker than that skin (≤ 15 %
+   "fabric-like") is tattooed skin → kept whole. A shorts panel has no skin → untouched.
+2. **Pixel fallback** (`inkOnSkin`, leg + shorts welded into one piece): raw skin detections are
+   **closed** with a radius of 5 % of the texture (≥ 4 % measured to bridge a dense sleeve). Closing
+   joins the skin between the lines into one body area and, unlike a blur/density window, never grows
+   past the outermost skin – so it stops at the hem (0 % spill into black shorts at any radius
+   tested). Everything inside that area is kept (black, red, white ink). Per-region tests failed
+   because sleeve ink touching dark shorts merges into one region.
+   Only runs with the ped's own skin model – generic detections on tan fabric seeded false positives
+   (caught on the freemode regression pack).
+**Needs the ped's `head_diff` texture in the processed folder** (that is where its skin tone comes from).
+
 ### Lenses / visors / glass
 * **Alpha**: large regions with alpha in [6, 250] (tinted lenses, visors) on lens-policy components
   or any drawable with a glass/alpha shader.
@@ -245,6 +261,9 @@ a looser flatness bound, no minimum UV area, and a *dark tinted pane* (L < 0.12)
 when it matches a black shell. Many exporters write **unwelded** meshes (this helmet: 2554 one-triangle
 "pieces") – vertices are welded by position + UV before finding pieces (also made it 15× faster).
 
+Names from uploads can lose the `^` entirely: `ig_jayjayhand_002_u.ydd` → the parser finds the
+right-most component name that starts a valid tail (and keeps a `p_` prefix for props).
+
 ### Print ink (`extendWithInk` in `src/core/recolor.js`)
 A coloured print is usually colour + black ink (pink letters with black fill/outlines, flames).
 Keeping only the colour and tinting the black ink lifts it to grey-brown and the print reads as
@@ -253,7 +272,9 @@ Keeping only the colour and tinting the black ink lifts it to grey-brown and the
 * a small sharp-edged blob touching the print, or
 * **reachable** from the print through ink within 6 % of the texture size, weighted by
   "inkness" = edge activity (thin strokes/flames) OR near-pure black (solid ink).
-A smooth dark-grey shadow fold touching a logo passes none of these.
+A smooth dark-grey shadow fold touching a logo passes none of these. Enclosed texels must also differ
+from the fabric (a red crosshair ring on a black hoodie encloses black *fabric*; keeping it left a
+black blob in-game).
 Accents themselves grow by hysteresis (confident seeds → connected same-hue texels down to C 0.02),
 because distressed prints are mostly faint speckled colour (measured C 0.02–0.08).
 
@@ -279,8 +300,9 @@ because distressed prints are mostly faint speckled colour (measured C 0.02–0.
   renamed `a_m_y_runner_01`): head/teeth/hair untouched, bare-hands texture fully protected by the
   ped skin model, suit/shirt/tie keep tonal separation; resource flags + system segment byte-identical,
   every non-recolored texture byte-identical.
-* `npm test` (9 tests): synthetic peds (skin + tattoo + khaki strip + tinted lens, race variants),
-  UV padding vs flat garment, print ink vs shadow, mesh lens vs frame, visor vs neck liner.
+* `npm test` (11 tests): synthetic peds (skin + tattoo + khaki strip + tinted lens, race variants),
+  UV padding vs flat garment, print ink vs shadow, mesh lens vs frame, visor vs neck liner, full-sleeve tattoos (separate pieces and welded,
+incl. red + white ink) vs shorts.
 * The author's own textures (skeleton tee, WrestleMania tank, leather tracksuit with chrome hardware,
   two-tone hoodie, grey set with pink/black grunge prints) and ig_jayjay's `p_eyes_003` glasses
   (.ydd + .ytd): hardware kept chrome, prints keep pink + black, lenses kept from the mesh.

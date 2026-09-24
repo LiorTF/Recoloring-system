@@ -240,3 +240,60 @@ test('head props: forward-facing dark visor is a lens even on a black shell; a d
   assert.ok(res.mask[110 * W + 10] > 0.9, 'visor texels protected');
   assert.ok(res.mask[10 * W + 110] < 0.1, 'neck liner is not a lens');
 });
+
+test('full-sleeve tattoos: a mesh piece that is skin + ink is kept whole; the shorts piece is recolored', () => {
+  const { buildProtectMask } = require('../src/core/protect');
+  const { buildSkinModel } = require('../src/color/skin');
+  const W = 256;
+  const r = rng(77);
+  const skinPx = () => [196 + (r() - 0.5) * 16, 140 + (r() - 0.5) * 12, 108 + (r() - 0.5) * 10].map(Math.round);
+  const head = { rgba: image(128, 128, () => skinPx()), width: 128, height: 128 };
+  const model = buildSkinModel([head]);
+  // left half = leg island: ~75% ink (black swirls + red lettering), skin only in gaps
+  // right half = shorts island: grey fabric
+  const tex = image(W, W, (x, y) => {
+    if (x < 128) {
+      const v = Math.sin(x / 5) * Math.cos(y / 7) + Math.sin((x + y) / 9);
+      if (y > 40 && y < 70 && x > 20 && x < 100) return [150, 20, 25]; // red ink text
+      if (v > -0.9) return [28 + r() * 20, 22 + r() * 16, 20 + r() * 14].map(Math.round); // black/brown ink
+      return skinPx();
+    }
+    return [140 + (r() - 0.5) * 10, 140, 142].map(Math.round);
+  });
+  const quad = (u0, u1) => ({ mesh: { pos: Float32Array.from([u0, 0, 0, u1, 0, 0, u1, 1, 0, u0, 1, 0]), uv: Float32Array.from([u0, 0, u1, 0, u1, 1, u0, 1]), indices: Uint16Array.from([0, 1, 2, 0, 2, 3]), vertexCount: 4 } });
+  const pm = buildProtectMask({ rgba: tex, width: W, height: W, skinMode: 'strict', skinModel: model, meshes: [quad(0, 0.49), quad(0.51, 1)] });
+  let inkKept = 0, inkN = 0, shorts = 0, sN = 0;
+  for (let y = 10; y < W - 10; y++) for (let x = 10; x < W - 10; x++) {
+    const i = y * W + x;
+    if (x < 118) { inkN++; if (pm.protect[i] > 0.9) inkKept++; }
+    if (x > 138) { sN++; if (pm.protect[i] > 0.1) shorts++; }
+  }
+  assert.ok(inkKept / inkN > 0.97, `tattooed leg kept: ${(inkKept / inkN).toFixed(3)}`);
+  assert.ok(shorts / sN < 0.02, `shorts not protected: ${(shorts / sN).toFixed(3)}`);
+});
+
+test('full-sleeve tattoos without separate mesh pieces: interleaved ink kept, black shorts recolored', () => {
+  const { buildProtectMask } = require('../src/core/protect');
+  const { buildSkinModel } = require('../src/color/skin');
+  const W = 256;
+  const r = rng(78);
+  const skinPx = () => [196 + (r() - 0.5) * 16, 140 + (r() - 0.5) * 12, 108 + (r() - 0.5) * 10].map(Math.round);
+  const model = buildSkinModel([{ rgba: image(128, 128, () => skinPx()), width: 128, height: 128 }]);
+  // top = black shorts (fabric texture), bottom = leg with a dense sleeve (ink lines, skin between)
+  const tex = image(W, W, (x, y) => {
+    if (y < 110) return [30 + (r() - 0.5) * 12, 30, 34].map(Math.round);
+    const v = Math.sin(x / 4) * Math.cos(y / 5) + 0.6 * Math.sin((x - y) / 6);
+    if (y > 200 && y < 215 && x > 30 && x < 120) return [150, 20, 25]; // red ink lettering
+    if ((x - 190) ** 2 + (y - 190) ** 2 < 15 ** 2) return [235, 232, 228]; // white-ink flower
+    return v > -0.5 ? [35 + r() * 20, 26 + r() * 14, 22 + r() * 12].map(Math.round) : skinPx();
+  });
+  const pm = buildProtectMask({ rgba: tex, width: W, height: W, skinMode: 'strict', skinModel: model, meshes: null });
+  let leg = 0, legN = 0, shorts = 0, sN = 0;
+  for (let y = 5; y < W - 5; y++) for (let x = 5; x < W - 5; x++) {
+    const i = y * W + x;
+    if (y > 125) { legN++; if (pm.protect[i] > 0.9) leg++; }
+    if (y < 90) { sN++; if (pm.protect[i] > 0.1) shorts++; }
+  }
+  assert.ok(leg / legN > 0.95, `sleeve kept: ${(leg / legN).toFixed(3)}`);
+  assert.ok(shorts / sN < 0.03, `shorts not protected: ${(shorts / sN).toFixed(3)}`);
+});

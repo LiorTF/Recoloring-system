@@ -55,7 +55,7 @@ function recolorGroup(members, ctx) {
       rgba: u.rgba0, width: u.w, height: u.h,
       skinMode: useRace ? 'normal' : s.skinMode, skinModel: s.skinModel, raceSkin: useRace,
       lensMode: s.lensMode, uv: s.uv, protectHair: s.protectHair !== false, protectRects: s.protectRects,
-      keepMetal: s.keepMetal, spec: s.spec, lensMeshes: s.lensMeshes, lensForward: s.lensForward,
+      keepMetal: s.keepMetal, spec: s.spec, lensMeshes: s.lensMeshes, lensForward: s.lensForward, meshes: s.meshes,
     });
     u.pm = pm;
     u.pad = pm.padding;

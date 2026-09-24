@@ -10,7 +10,7 @@ const skin = require('../color/skin');
 const { rgbaToOklabPlanes } = require('../color/oklab');
 const { paddingFromUV, paddingFromImage } = require('./padding');
 const { metalFromIslands, metalFromSpecMap } = require('./metal');
-const { lensFromMesh } = require('./lensMesh');
+const { lensFromMesh, meshIslands } = require('./lensMesh');
 
 /** Large semi-transparent regions = tinted lenses / visors. */
 function alphaLensMask(rgba, w, h, { minAlpha = 6, maxAlpha = 250, minAreaFrac = 0.002 } = {}) {
@@ -113,6 +113,18 @@ function buildProtectMask(p) {
         if (vis && cov / vis > limit) { mask = new Float32Array(n); parts.skinSource = `generic (rejected: ${(100 * cov / vis).toFixed(0)}% of garment looked skin-coloured)`; }
       }
       parts.skin = mask;
+      // full-sleeve tattoos: whole mesh pieces that are skin + ink (model UV islands)
+      if (p.meshes && p.meshes.length) {
+        const islands = meshIslands(p.meshes, w, h);
+        const tat = skin.tattooedIslands(islands, score, planes, rgba, w, h, { minSkin: p.skinModel ? 0.08 : 0.2 });
+        if (tat) { parts.tattooIslands = tat.mask; parts.tattooIslandInfo = tat.islands; M.maxInto(parts.skin = Float32Array.from(parts.skin), tat.mask); }
+      }
+      // ink interleaved with skin (leg + shorts welded into one piece, or no .ydd at all).
+      // Only with THIS ped's skin model: generic detections on tan fabric must never seed it.
+      if (p.skinModel) {
+        const ink = skin.inkOnSkin(parts.skin, score, planes, rgba, w, h);
+        if (ink) { parts.tattooInk = ink.mask; M.maxInto(parts.skin = Float32Array.from(parts.skin), ink.mask); }
+      }
     }
     M.maxInto(protect, parts.skin);
   }

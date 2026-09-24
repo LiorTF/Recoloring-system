@@ -284,7 +284,13 @@ function extendWithInk(accent, planes, w, h, baseL, o) {
   const bridged = M.close(seed, w, h, Math.max(2, Math.round(Math.max(w, h) / 700)));
   // only the COLOURED print can close these loops, so fabric is rarely enclosed
   const filled = M.fillHoles(bridged, w, h, Math.round(n * o.enclosedMaxShare));
-  for (let i = 0; i < n; i++) if (filled[i] && !seed[i] && out[i] < 1) { out[i] = 1; added++; }
+  // ...but only texels that are NOT the fabric itself: a red crosshair ring on a black hoodie
+  // encloses black FABRIC, which must be recolored with the rest (it left a black blob)
+  for (let i = 0; i < n; i++) {
+    if (!filled[i] || seed[i] || out[i] >= 1) continue;
+    if (Math.abs(L[i] - baseL) < o.inkMinContrast && Math.hypot(A[i], B[i]) <= o.inkMaxChroma) continue;
+    out[i] = 1; added++;
+  }
   if (!added) return accent;
   return M.boxBlur(out, w, h, 1);
 }

@@ -150,4 +150,24 @@ function lensFromMesh(geoms, planes, w, h, { minCoherence = 0.75, maxHoleFrac = 
   return { mask, pieces: pieces.map(({ island, ...r }) => r) };
 }
 
-module.exports = { lensFromMesh };
+/**
+ * Rasterised UV island of every connected mesh piece (after welding). Used by skin/tattoo
+ * logic: a leg, an arm and a shorts panel are separate pieces with separate islands.
+ * @returns {Array<{triangles:number, island:Uint8Array, area:number}>}
+ */
+function meshIslands(geoms, w, h) {
+  const out = [];
+  for (const g of geoms || []) {
+    const m = g.mesh; if (!m || !m.pos || !m.indices || !m.uv) continue;
+    for (const tris of components(m.indices, m.vertexCount, weldMap(m.pos, m.uv, m.vertexCount))) {
+      const uvTris = new Float32Array(tris.length * 6);
+      tris.forEach((t, k) => { for (let j = 0; j < 3; j++) { const v = m.indices[t + j]; uvTris[k * 6 + j * 2] = m.uv[v * 2]; uvTris[k * 6 + j * 2 + 1] = m.uv[v * 2 + 1]; } });
+      const island = M.rasterizeUVTriangles(uvTris, w, h);
+      let area = 0; for (let i = 0; i < island.length; i++) area += island[i];
+      if (area) out.push({ triangles: tris.length, island, area });
+    }
+  }
+  return out;
+}
+
+module.exports = { lensFromMesh, meshIslands };
