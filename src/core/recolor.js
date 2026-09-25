@@ -335,7 +335,9 @@ function extendWithInk(accent, planes, w, h, baseL, o, lut = null, modes = null)
     for (const q of [i - 1, i + 1, i - w, i + w]) {
       if (fabricTone[q]) continue;
       if (seed[q]) colWall[l]++;
-      else if (Math.abs(L[q] - baseL) >= o.inkMinContrast && Math.hypot(A[q], B[q]) <= o.inkMaxChroma) inkWall[l]++;
+      // walls of ink that is its own design (a skeleton a crosshair is drawn over) don't make a
+      // fabric speck part of the coloured print (it left a white fabric speck in the crosshair)
+      else if (ink[q] && !ownEl[q]) inkWall[l]++;
     }
   }
   for (let i = 0; i < n; i++) {
@@ -361,7 +363,10 @@ function designMask(planes, n, plan, width, height, color) {
     const target = Array.isArray(color) && color.length === 3 && color[0] <= 1.5 ? color : srgb8ToOklab(...parseHex(color));
     lut = buildToneCurve(plan.modes && plan.modes.length ? plan.modes : [{ Lb: plan.baseL, down: 0.05, up: 0.05, share: 1 }], target[0], o);
   }
-  return extendWithInk(acc, planes, width, height, plan.baseL, o, lut, plan.modes);
+  const full = extendWithInk(acc, planes, width, height, plan.baseL, o, lut, plan.modes);
+  const res = full === acc ? Float32Array.from(acc) : full;
+  res.colorPart = acc; // the coloured print alone (for edge unmixing in apply)
+  return res;
 }
 
 /**
@@ -584,11 +589,7 @@ function apply(rgba, width, height, protect, plan, color, cache = {}) {
   const tint = makeTinter(plan, target);
   const lab = [0, 0, 0], rgb = new Uint8Array(3);
   const memo = new Map();
-  for (let i = 0; i < n; i++) {
-    const p = protect ? protect[i] : 0;
-    const keep = Math.max(p, o.keepAccents ? accent[i] : 0);
-    const mix = (1 - keep) * o.strength;
-    if (mix <= 0.002) continue;
+  const tinted = (i) => {
     const r = rgba[i * 4], g = rgba[i * 4 + 1], b = rgba[i * 4 + 2];
     const key = (r << 16) | (g << 8) | b;
     let t = memo.get(key);
@@ -598,6 +599,83 @@ function apply(rgba, width, height, protect, plan, color, cache = {}) {
       t = (rgb[0] << 16) | (rgb[1] << 8) | rgb[2];
       if (memo.size < 300000) memo.set(key, t);
     }
+    return t;
+  };
+  // Edge UNMIXING for kept coloured prints: an anti-aliased edge texel is part print colour,
+  // part fabric. Keeping it as-is left a pale fringe (red crosshair drawn on WHITE fabric, hoodie
+  // dyed red). Its print share alpha = its chroma relative to the print's core colour next to it;
+  // result = alpha * core + (1 - alpha) * recoloured fabric.
+  const colorPart = o.keepAccents && accent && accent.colorPart ? accent.colorPart : null;
+  const C = (i) => Math.hypot(planes.A[i], planes.B[i]);
+  const unmixed = new Map();
+  if (colorPart) {
+    for (let i = 0; i < n; i++) {
+      const cp = colorPart[i];
+      if (cp <= 0.02 || (protect && protect[i] >= 0.5)) continue;
+      if (accent[i] > cp + 0.05) continue; // also kept as ink (black letters): leave original
+      const x = i % width, y = (i / width) | 0;
+      let core = -1, cC = 0;
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+        const xx = x + dx, yy = y + dy;
+        if (xx < 0 || yy < 0 || xx >= width || yy >= height) continue;
+        const q = yy * width + xx;
+        if (colorPart[q] < 0.5) continue;
+        const c = C(q); if (c > cC) { cC = c; core = q; }
+      }
+      if (core < 0 || cC < o.accentMinChroma) continue;
+      const alpha = Math.max(0, Math.min(1, (C(i) / cC - 0.15) / 0.75));
+      if (alpha >= 0.98) continue; // core texel: keep as is
+      unmixed.set(i, { alpha, core });
+    }
+  }
+  // The same for the soft border of every other kept print (black ink, white print): the
+  // softened accent mask reaches past the ink onto pure fabric texels, which were then only
+  // partly dyed (pale pink specks on white fabric beside a black line on a red hoodie). Each
+  // border texel is projected onto the line fabric -> ink between its nearest undyed fabric
+  // texel and its strongest kept texel: fabric gets fully dyed, a real AA texel keeps its ink share.
+  if (o.keepAccents && accent) {
+    const { L, A, B } = planes;
+    for (let i = 0; i < n; i++) {
+      const a = accent[i];
+      if (a <= 0.02 || a >= 0.95 || unmixed.has(i) || (protect && protect[i] >= 0.5)) continue;
+      const x = i % width, y = (i / width) | 0;
+      // fabric = least-kept texel around (inside a dense print pocket it is still partly kept)
+      let core = -1, ca = 0, fab = -1, fa = 0.3, fd = Infinity;
+      for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) {
+        const xx = x + dx, yy = y + dy;
+        if (xx < 0 || yy < 0 || xx >= width || yy >= height) continue;
+        const q = yy * width + xx;
+        if (accent[q] > ca) { ca = accent[q]; core = q; }
+        const d = dx * dx + dy * dy;
+        if (accent[q] < fa - 0.02 || (accent[q] <= fa + 0.02 && d < fd)) { fa = accent[q]; fd = d; fab = q; }
+      }
+      if (core < 0 || fab < 0 || ca < 0.8) continue;
+      const vx = L[core] - L[fab], vy = A[core] - A[fab], vz = B[core] - B[fab];
+      const len2 = vx * vx + vy * vy + vz * vz;
+      if (len2 < 0.01) continue; // ink ~ fabric colour: nothing to separate
+      const alpha = Math.max(0, Math.min(1, ((L[i] - L[fab]) * vx + (A[i] - A[fab]) * vy + (B[i] - B[fab]) * vz) / len2));
+      unmixed.set(i, { alpha: Math.min(alpha, a), core });
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    const um = unmixed.get(i);
+    if (um) {
+      const t = tinted(i);
+      const tr = (t >> 16) & 255, tg = (t >> 8) & 255, tb = t & 255;
+      const c = um.core, a = um.alpha;
+      const mixS = o.strength;
+      const nr = a * rgba[c * 4] + (1 - a) * tr, ng = a * rgba[c * 4 + 1] + (1 - a) * tg, nb = a * rgba[c * 4 + 2] + (1 - a) * tb;
+      out[i * 4] = Math.round(rgba[i * 4] + (nr - rgba[i * 4]) * mixS);
+      out[i * 4 + 1] = Math.round(rgba[i * 4 + 1] + (ng - rgba[i * 4 + 1]) * mixS);
+      out[i * 4 + 2] = Math.round(rgba[i * 4 + 2] + (nb - rgba[i * 4 + 2]) * mixS);
+      continue;
+    }
+    const p = protect ? protect[i] : 0;
+    const keep = Math.max(p, o.keepAccents ? accent[i] : 0);
+    const mix = (1 - keep) * o.strength;
+    if (mix <= 0.002) continue;
+    const r = rgba[i * 4], g = rgba[i * 4 + 1], b = rgba[i * 4 + 2];
+    const t = tinted(i);
     const tr = (t >> 16) & 255, tg = (t >> 8) & 255, tb = t & 255;
     out[i * 4] = Math.round(r + (tr - r) * mix);
     out[i * 4 + 1] = Math.round(g + (tg - g) * mix);

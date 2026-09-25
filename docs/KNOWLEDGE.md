@@ -241,6 +241,19 @@ real tracksuit). Pixel statistics can't do it: prints/text are just as hard blac
   (white panel 0.6–0.9, grey sock 0.3–0.6, knit ribbing has no highlights).
 * With a real spec map in the .ydd, bright spec = shiny parts (`metalFromSpecMap`), unless the whole
   garment is shiny (latex / patent leather).
+* **Mesh pieces first** (`metalFromMesh`, when the .ydd is present): buckles, clasps, rings and pulls
+  are their own small welded mesh pieces. A piece is metal when it is small (≤ 3 % of the sheet),
+  colourless and its median L ≥ max(0.45, garment L + 0.25). On ig_jayjay's bag the texture island
+  rule kept a whole hardware column including the **black leather strap tab** (its own piece, L ≈ 0.35),
+  so the tab stayed black on a red bag (reported). With the model the island rule is not used.
+* **Zipper coils painted on fabric** (`metalFromTexture`): the bag's zippers are not separate pieces,
+  they are drawn on the panels. Texels that are bright (≥ garment + 0.25), colourless, textured and
+  have edges in all directions (structure-tensor coherence ≤ 0.75), closed into bands. A band is kept
+  when it is mostly grey (≥ 40 % L 0.4–0.93, < 30 % pure white – white skeleton/text prints fail),
+  thin (2·area/perimeter ≤ 2 % of the size), long (span ≥ 8× thickness) and **dense**: ≥ 62 % of its
+  texels pass the per-texel test on their own. Measured: bag coils 0.65–0.75; grey cloud/figure prints
+  (WrestleMania, pink-logo edges) 0.07–0.59. The bag's spec map is useless here (values 38–66, metal
+  darker than the leather), so the spec rule is not relied on.
 
 ### Lenses from the MESH (`src/core/lensMesh.js`)
 Real case: ig_jayjay's glasses have opaque black lenses, same `ped` shader as the frame, alpha 255 –
@@ -280,6 +293,13 @@ rather than by the coloured lines (crosshair compartments are walled by red). Wh
 the fabric itself isn't white (on a white hoodie it grew into a white patch next to the ribs – reported),
 and ink is only kept where the tone curve would visibly move it (≥ 0.1 L): white ribs that end up
 near-white anyway must not be kept pure white next to cream-tinted ribs.
+**Soft edges are unmixed**, not blended: the kept-print mask is softened, so its border reaches pure
+fabric texels that were then only partly dyed (pale pink specks next to the black/red crosshair on a
+red hoodie – reported). Each border texel is projected onto the line between its least-kept neighbour
+(fabric) and its most-kept neighbour (ink) in OKLab; the result is `alpha·ink + (1−alpha)·dyed`, so a
+pure fabric texel is fully dyed and a true anti-aliased texel keeps only its ink share. Coloured prints
+use chroma relative to the print's core colour as alpha. A distress speck also only counts as walled by
+ink if the wall is real ink (a black skeleton rib next to the crosshair is not).
 Accents themselves grow by hysteresis (confident seeds → connected same-hue texels down to C 0.02),
 because distressed prints are mostly faint speckled colour (measured C 0.02–0.08).
 

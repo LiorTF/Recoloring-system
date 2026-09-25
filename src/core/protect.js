@@ -9,7 +9,7 @@ const M = require('./masks');
 const skin = require('../color/skin');
 const { rgbaToOklabPlanes } = require('../color/oklab');
 const { paddingFromUV, paddingFromImage } = require('./padding');
-const { metalFromIslands, metalFromSpecMap } = require('./metal');
+const { metalFromIslands, metalFromSpecMap, metalFromTexture, metalFromMesh } = require('./metal');
 const { lensFromMesh, meshIslands } = require('./lensMesh');
 
 /** Large semi-transparent regions = tinted lenses / visors. */
@@ -92,6 +92,7 @@ function buildProtectMask(p) {
   const { rgba, width: w, height: h } = p;
   const n = w * h;
   const parts = {};
+  let meshIsl = null; // model pieces rasterized to UV (shared by tattoo and metal rules)
   const protect = new Float32Array(n);
   const planes = p.planes || rgbaToOklabPlanes(rgba, n);
 
@@ -115,7 +116,7 @@ function buildProtectMask(p) {
       parts.skin = mask;
       // full-sleeve tattoos: whole mesh pieces that are skin + ink (model UV islands)
       if (p.meshes && p.meshes.length) {
-        const islands = meshIslands(p.meshes, w, h);
+        const islands = meshIsl = meshIslands(p.meshes, w, h);
         const tat = skin.tattooedIslands(islands, score, planes, rgba, w, h, { minSkin: p.skinModel ? 0.08 : 0.2 });
         if (tat) { parts.tattooIslands = tat.mask; parts.tattooIslandInfo = tat.islands; M.maxInto(parts.skin = Float32Array.from(parts.skin), tat.mask); }
       }
@@ -148,10 +149,20 @@ function buildProtectMask(p) {
   if (p.keepMetal !== false) {
     const parts2 = [];
     if (p.spec) { const s = metalFromSpecMap(p.spec.rgba, p.spec.width, p.spec.height, w, h); if (s) parts2.push(s.mask); }
-    const isl = metalFromIslands(planes, w, h, padding && padding.mask);
-    if (isl) parts2.push(isl.mask);
+    const pad = padding && padding.mask;
+    const baseL = garmentMedianL(planes.L, pad);
+    // with the model, hardware is judged per mesh piece (keeps a dark leather tab dyeable);
+    // without it, per texture island
+    if (!meshIsl && p.meshes && p.meshes.length) meshIsl = meshIslands(p.meshes, w, h);
+    const mm = meshIsl && meshIsl.length ? metalFromMesh(meshIsl, planes, w, h, baseL) : null;
+    if (mm) { parts2.push(mm.mask); parts.metalPieces = mm.pieces; }
+    if (!meshIsl || !meshIsl.length) { const isl = metalFromIslands(planes, w, h, pad); if (isl) parts2.push(isl.mask); }
+    // zipper coils painted onto fabric pieces
+    const mt = metalFromTexture(planes, w, h, baseL, { ignore: pad });
+    if (mt) { parts2.push(mt.mask); parts.metalTexture = mt.mask; }
     if (parts2.length) {
-      parts.metal = parts2.length === 1 ? parts2[0] : M.maxInto(Float32Array.from(parts2[0]), parts2[1]);
+      parts.metal = Float32Array.from(parts2[0]);
+      for (let k = 1; k < parts2.length; k++) M.maxInto(parts.metal, parts2[k]);
       M.maxInto(protect, parts.metal);
     }
   }
@@ -164,3 +175,13 @@ function buildProtectMask(p) {
 }
 
 module.exports = { alphaLensMask, uvRoleMasks, buildProtectMask, rectMask };
+
+/** Median lightness of the garment's used texels (the dominant fabric's tone). */
+function garmentMedianL(L, padding) {
+  const v = [];
+  const step = Math.max(1, Math.floor(L.length / 200000));
+  for (let i = 0; i < L.length; i += step) if (!padding || !padding[i]) v.push(L[i]);
+  if (!v.length) return 0.5;
+  v.sort((a, b) => a - b);
+  return v[v.length >> 1];
+}

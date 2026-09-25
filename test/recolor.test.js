@@ -326,3 +326,33 @@ test('extras: red main colour + black _b + white _c variants, skin untouched in 
     assert.ok(d / n < 3, 'skin identical in every variant');
   }
 });
+
+test('metal: zipper coil on fabric and light hardware pieces are kept; grey print and dark leather tab are not', () => {
+  const { metalFromTexture, metalFromMesh } = require('../src/core/metal');
+  const { rgbaToOklabPlanes } = require('../src/color/oklab');
+  const w = 512, h = 512;
+  const r = rng(7);
+  const src = image(w, h, (x, y) => {
+    // zipper: a thin vertical band of chrome teeth (bright tops, grey flanks, dark gaps)
+    if (x >= 250 && x < 260 && y >= 40 && y < 470) {
+      const t = (y + (x < 255 ? 0 : 3)) % 6;
+      const v = t < 1 ? 70 : t < 3 ? 150 + (x % 5) * 18 : 120 + (r() * 60);
+      return [v, v, v + 2].map(Math.round);
+    }
+    // grey noisy cloud print: patchy, blob-shaped
+    if ((x - 120) ** 2 + (y - 150) ** 2 < 55 ** 2 && r() < 0.5) { const v = 110 + r() * 110; return [v, v, v].map(Math.round); }
+    return fabric([40, 40, 42], 8, x * 7 + y)();
+  });
+  const planes = rgbaToOklabPlanes(src, w * h);
+  const mt = metalFromTexture(planes, w, h, 0.3);
+  assert.ok(mt, 'zipper found');
+  assert.ok(mt.mask[250 * w + 255] > 0.5, 'coil is metal');
+  assert.ok(mt.mask[150 * w + 120] < 0.1, 'grey cloud print is not metal');
+
+  const piece = (x0, y0, s) => { const m = new Uint8Array(w * h); for (let y = y0; y < y0 + s; y++) for (let x = x0; x < x0 + s; x++) m[y * w + x] = 1; return { island: m, area: s * s }; };
+  const px = image(w, h, (x, y) => (x >= 400 && x < 430 && y >= 400 && y < 430 ? [190, 190, 195] : [40, 40, 42]));
+  const pl2 = rgbaToOklabPlanes(px, w * h);
+  const mm = metalFromMesh([piece(400, 400, 30), piece(300, 400, 30), piece(0, 0, 400)], pl2, w, h, 0.3);
+  assert.ok(mm && mm.pieces === 1, 'only the light hardware piece');
+  assert.ok(mm.mask[415 * w + 415] > 0.5 && mm.mask[415 * w + 315] < 0.1, 'dark tab piece is dyed');
+});
