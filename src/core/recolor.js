@@ -36,6 +36,8 @@ const DEFAULTS = Object.freeze({
   inkMaxShare: 0.03,          // bigger neutral regions are fabric panels, not ink
   inkMinEdge: 0.12,
   inkMinShift: 0.1,
+  inkTouchShareMin: 0.1,      // keep ink of a tone only if >= this share of its sharp printed ink touches the coloured print
+                              // (measured: skeleton + red crosshair 1-2 %, grunge logo black ink 24 %)
   enclosedFabricTol: 0.08,
   distressSpeckMax: 0.00005,  // fabric-tone specks inside a print up to this share (~200 px at 2k) are print distress    // enclosed texels this close to the fabric base tone are fabric, not ink           // keep neutral ink only if the recolor would move its lightness this much
   inkReach: 0.06,
@@ -50,7 +52,10 @@ const DEFAULTS = Object.freeze({
   materialSeparation: 1.0,    // 1 = keep tonal separation between materials (white shirt vs black suit), 0 = all -> target
   materialMinShare: 0.1,      // a lightness mode needs this share of cloth to be its own material
   materialMinGap: 0.14,       // ... and to be this far (OKLab L) from its neighbour
-  minDetail: 0.35,            // never compress in-material detail below this slope
+  minDetail: 0.35,
+  flipCrowded: true,          // move a print to the other side of the fabric when it would vanish (white on white)
+  minMaterialSep: 0.1,        // OKLab L separation below which a material counts as crowded
+  flipOffset: 0.35,           // how far the flipped print sits from the fabric            // never compress in-material detail below this slope
 });
 
 const smooth = (e0, e1, x) => { const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
@@ -204,7 +209,7 @@ function accentMap(planes, n, materialHues, o, width, height) {
  * accent and is print-sized. On a black garment black is not "different from the
  * fabric", so a logo there never drags the fabric along.
  */
-function extendWithInk(accent, planes, w, h, baseL, o, lut = null) {
+function extendWithInk(accent, planes, w, h, baseL, o, lut = null, modes = null) {
   if (!w || !h) return accent;
   const n = w * h;
   const { L, A, B } = planes;
@@ -229,7 +234,7 @@ function extendWithInk(accent, planes, w, h, baseL, o, lut = null) {
   const steps = Array.from({ length: count }, () => []);
   for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
     const i = y * w + x, l = labels[i];
-    if (l < 0 || !touch[l]) continue;
+    if (l < 0) continue;
     for (const q of [i - 1, i + 1, i - w, i + w]) {
       if (labels[q] === l || accent[q] >= 0.5) continue;
       // step over 2 px outward (DXT blocks soften a 1 px edge)
@@ -238,19 +243,36 @@ function extendWithInk(accent, planes, w, h, baseL, o, lut = null) {
       if (steps[l].length < 4000) steps[l].push(Math.abs(far - L[i]));
     }
   }
+  const sharp = new Uint8Array(count);
   for (let l = 0; l < count; l++) {
-    if (!touch[l]) continue;
     const st = steps[l];
-    if (!st.length) continue; // fully enclosed by the accent: ink inside the print
+    if (!st.length) { sharp[l] = 1; continue; } // fully enclosed by the accent: ink inside the print
     st.sort((a, b) => a - b);
-    if (st[st.length >> 1] < o.inkMinEdge) touch[l] = 0;
+    sharp[l] = st[st.length >> 1] >= o.inkMinEdge ? 1 : 0;
+    if (!sharp[l]) touch[l] = 0;
   }
+  // Per ink tone (dark / white): if most SHARP-edged printed ink of that tone does NOT touch
+  // the coloured print, that tone is a design style of its own (a white skeleton that a small
+  // red crosshair is drawn over) – the tone curve renders all of it uniformly, and keeping
+  // only the bits touching the accent made a mismatched patch. Black ink that exists only
+  // inside/around pink logos is kept.
+  const firstPx = new Int32Array(count).fill(-1);
+  for (let i = 0; i < n; i++) { const l = labels[i]; if (l >= 0 && firstPx[l] < 0) firstPx[l] = i; }
+  const tot = [0, 0], tch = [0, 0];
+  for (let l = 0; l < count; l++) {
+    if (!sharp[l]) continue;
+    const c = L[firstPx[l]] >= 0.5 ? 1 : 0;
+    tot[c] += sizes[l]; if (touch[l]) tch[c] += sizes[l];
+  }
+  const toneOwn = [tot[0] > 0 && tch[0] / tot[0] < o.inkTouchShareMin, tot[1] > 0 && tch[1] / tot[1] < o.inkTouchShareMin];
+  const ownEl = new Uint8Array(n);
+  for (let i = 0; i < n; i++) if (ink[i] && toneOwn[L[i] >= 0.5 ? 1 : 0]) ownEl[i] = 1;
   const out = new Float32Array(n);
   let added = 0;
   for (let i = 0; i < n; i++) {
     if (accent[i] >= 0.5) { out[i] = 1; continue; }
     const l = labels[i];
-    if (l >= 0 && touch[l] && sizes[l] <= n * o.inkBlobMaxShare) { out[i] = 1; added++; }
+    if (l >= 0 && touch[l] && sizes[l] <= n * o.inkBlobMaxShare && !ownEl[i]) { out[i] = 1; added++; }
   }
   // Ink is often connected to the fabric's dark shadow folds, so whole regions fail the
   // test above. Pixel level: ink reachable from the coloured print THROUGH ink within a
@@ -281,6 +303,7 @@ function extendWithInk(accent, planes, w, h, baseL, o, lut = null) {
   for (let i = 0; i < n; i++) {
     const d = dist[i];
     if (d <= 0) continue;
+    if (ownEl[i]) continue;
     // edge-active (thin strokes, flames) OR near-pure black (solid printed ink); a shadow
     // fold is dark GREY and smooth, so it passes neither
     const inkness = Math.max(smooth(0.025, 0.06, ls[i]), 1 - smooth(0.08, 0.15, L[i]));
@@ -316,7 +339,7 @@ function extendWithInk(accent, planes, w, h, baseL, o, lut = null) {
     }
   }
   for (let i = 0; i < n; i++) {
-    if (!filled[i] || seed[i] || out[i] >= 1) continue;
+    if (!filled[i] || seed[i] || out[i] >= 1 || ownEl[i]) continue;
     if (fabricTone[i]) { const l = ft.labels[i]; if (ft.sizes[l] > speckMax || inkWall[l] <= colWall[l]) continue; } // enclosed fabric
     if (!fabricTone[i] && Math.hypot(A[i], B[i]) <= o.inkMaxChroma && shift(L[i]) < o.inkMinShift) continue;
     out[i] = 1; added++;
@@ -338,7 +361,7 @@ function designMask(planes, n, plan, width, height, color) {
     const target = Array.isArray(color) && color.length === 3 && color[0] <= 1.5 ? color : srgb8ToOklab(...parseHex(color));
     lut = buildToneCurve(plan.modes && plan.modes.length ? plan.modes : [{ Lb: plan.baseL, down: 0.05, up: 0.05, share: 1 }], target[0], o);
   }
-  return extendWithInk(acc, planes, width, height, plan.baseL, o, lut);
+  return extendWithInk(acc, planes, width, height, plan.baseL, o, lut, plan.modes);
 }
 
 /**
@@ -401,7 +424,7 @@ function lightnessModes(L, weights, n, o) {
  * the available headroom requires), and inside each material the detail slope stays
  * as close to 1 as possible. Monotonic by construction -> shading never inverts.
  */
-function buildToneCurve(modes, Lt, o) {
+function buildToneCurveCore(modes, Lt, o) {
   const size = 2048;
   const lut = new Float32Array(size + 1);
   if (!modes.length) { for (let i = 0; i <= size; i++) lut[i] = Lt; return lut; }
@@ -472,6 +495,52 @@ function softKnee(x, headroom, knee) {
   if (x <= k) return x;
   const r = headroom - k;
   return k + r * (1 - Math.exp(-(x - k) / r));
+}
+
+/**
+ * Tone curve with "crowded material" flipping: when a print sits on the side of the fabric
+ * that has no headroom left (white skeleton on a hoodie being dyed WHITE, black print on one
+ * dyed BLACK), keeping the tonal order squeezes it onto the fabric and the design vanishes.
+ * Such an outermost material is moved to the other side instead (white print -> grey on a white
+ * hoodie). Shading inside fabric and inside print keeps its direction; only the jump between
+ * them reverses, which only affects the few anti-aliased edge texels.
+ */
+function buildToneCurve(modes, Lt, o) {
+  const base = buildToneCurveCore(modes, Lt, o);
+  if (!o.flipCrowded || modes.length < 2) return base;
+  const size = base.length - 1;
+  const at = (lut, x) => lut[Math.min(size, Math.max(0, Math.round(x * size)))];
+  let dom = 0; for (let k = 1; k < modes.length; k++) if (modes[k].share > modes[dom].share) dom = k;
+  const flips = [];
+  for (const k of [0, modes.length - 1]) {
+    if (k === dom) continue;
+    const up = modes[k].Lb > modes[dom].Lb;
+    const sep = Math.abs(at(base, modes[k].Lb) - at(base, modes[dom].Lb));
+    const otherRoom = up ? Lt - o.minL : o.maxL - Lt;
+    if (sep < o.minMaterialSep && otherRoom > o.flipOffset + 0.05) flips.push({ k, up });
+  }
+  if (!flips.length) return base;
+  const keep = modes.filter((_, k) => !flips.some((f) => f.k === k));
+  const lut = buildToneCurveCore(keep, Lt, o);
+  for (const { k, up } of flips) {
+    const m = modes[k];
+    const Tf = up ? Lt - o.flipOffset : Lt + o.flipOffset;
+    const slope = 0.8;
+    // neighbour band edge (last texel of the nearest kept material on the fabric side)
+    const nb = up ? Math.max(...keep.filter((q) => q.Lb < m.Lb).map((q) => q.Lb + q.up))
+      : Math.min(...keep.filter((q) => q.Lb > m.Lb).map((q) => q.Lb - q.down));
+    const bandStart = up ? m.Lb - m.down : m.Lb + m.up;
+    for (let i = 0; i <= size; i++) {
+      const x = i / size;
+      if (up ? x >= bandStart : x <= bandStart) lut[i] = Math.max(o.minL, Math.min(o.maxL, Tf + slope * (x - m.Lb)));
+      else if (up ? x > nb : x < nb) {
+        const t = (x - nb) / (bandStart - nb);
+        const a = at(lut, nb), b = Tf + slope * (bandStart - m.Lb);
+        lut[i] = a + (b - a) * Math.max(0, Math.min(1, t));
+      }
+    }
+  }
+  return lut;
 }
 
 /** Map one OKLab texel through the plan -> tinted OKLab. */

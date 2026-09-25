@@ -13,6 +13,7 @@ const { readDDS } = require('../formats/dds');
 const { FMT, FMT_NAME } = require('../formats/texfmt');
 const { decodeMip } = require('../texture/codec');
 const { parseName, policyFor, SKIN_RACES, drawableNameFromHash } = require('./naming');
+const { joaat } = require('../util/joaat');
 const { recolorGroup } = require('../core/textureJob');
 const { uvRoleMasks } = require('../core/protect');
 const skin = require('../color/skin');
@@ -91,7 +92,7 @@ async function recolorStream(opts) {
  * @param {Array<{path:string, buffer:Buffer}>} inputFiles  paths relative to the stream folder
  * @returns {Promise<{files: Array<{path:string, buffer:Buffer, changed:boolean}>, report:object}>}
  */
-async function recolorFiles(inputFiles, opts = {}) {
+async function recolorFilesCore(inputFiles, opts = {}) {
   const color = opts.color || '#d3ac92';
   const log = opts.log || (() => {});
   const skinPolicy = opts.skin || 'auto';
@@ -204,6 +205,7 @@ async function recolorFiles(inputFiles, opts = {}) {
     const comp = x.info.component || null;
     const policy = comp ? policyFor(comp, x.ped, overrides) : (overrides['*'] || 'recolor');
     let reason = null;
+    if (opts.onlyPaths && !opts.onlyPaths.has(x.file.rel)) continue; // context file (skin model, UVs) only
     if (x.kind !== 'diffuse') reason = `${x.kind} map`;
     else if (policy === 'skip') reason = `component "${comp}" is protected by policy`;
     else if (comp === 'hair' && !opts.recolorHair) reason = 'hair';
@@ -335,4 +337,90 @@ function makePreviewWriter(dir) {
   };
 }
 
-module.exports = { recolorStream, recolorFiles, classifyTexture, looksLikeNormalMap };
+// ---------------------------------------------------------------------------------------------
+// Extra variants: besides the main colour, add BLACK and/or WHITE versions of every garment as
+// new texture variations (next free letters: a garment with only _a gets _b / _c).
+// ---------------------------------------------------------------------------------------------
+const EXTRA_COLORS = { black: '#1c1c1c', white: '#ececec' }; // not pure: shading needs headroom
+const LETTERS = 'abcdefghijklmnopqrstuvwxyz';
+
+function extrasList(extras, custom = {}) {
+  const pick = { none: [], black: ['black'], white: ['white'], both: ['black', 'white'] }[extras || 'none'];
+  if (!pick) throw new Error(`extras must be none | black | white | both (got "${extras}")`);
+  return pick.map((k) => ({ name: k, color: custom[k] || EXTRA_COLORS[k] }));
+}
+
+/** Copy a single-texture .ytd as another variation: same bytes, internal name + hash patched in place. */
+function renameSingleTextureYtd(buffer, newName) {
+  const res = readRsc7(buffer);
+  const tex = readYtd(res);
+  if (tex.length !== 1) return null; // multi-texture dictionaries (single-file peds) can't grow in place
+  const t = tex[0];
+  const namePtr = res.ptr(t.ptr + 0x28);
+  if (t.name && t.name.length === newName.length && namePtr) {
+    const r = res.resolve(namePtr);
+    r.buf.write(newName, r.off, 'latin1');
+    const hashes = res.ptr(0x50000000 + 0x20);
+    if (hashes) res.writeU32(hashes, joaat(newName));
+  }
+  // names of other lengths (e.g. "Texture By LioR 1") are left alone: GTA resolves by FILE name
+  return res.toBuffer();
+}
+
+async function recolorFiles(inputFiles, opts = {}) {
+  const main = await recolorFilesCore(inputFiles, opts);
+  const extras = extrasList(opts.extras, opts.extraColors);
+  if (!extras.length) return main;
+
+  // garment texture files grouped by ped + drawable + race; the source of every extra is the
+  // ORIGINAL (un-recoloured) lowest variant, so the design is the same as the main recolour
+  const norm = (p) => String(p).replace(/\\/g, '/');
+  const groups = new Map();
+  for (const f of inputFiles) {
+    const rel = norm(f.path);
+    if (!/\.ytd$/i.test(rel)) continue;
+    const info = parseName(rel);
+    if (info.kind !== 'texture' || info.textureType !== 'diffuse' || !info.variant) continue;
+    const policy = policyFor(info.component, info.ped, opts.components || {});
+    if (policy === 'skip' || (info.component === 'hair' && !opts.recolorHair)) continue;
+    const key = `${info.ped}|${info.stem}|${info.race || ''}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push({ rel, info, buffer: f.buffer });
+  }
+  main.report.extras = [];
+  const taken = new Set(inputFiles.map((f) => norm(f.path).toLowerCase()));
+  const plans = []; // { extra, synthetic:[{path,buffer}] }
+  for (const extra of extras) plans.push({ extra, synthetic: [] });
+  for (const [, members] of groups) {
+    members.sort((a, b) => a.info.variant.localeCompare(b.info.variant));
+    const src = members[0];
+    let next = LETTERS.indexOf(members[members.length - 1].info.variant) + 1;
+    for (const plan of plans) {
+      if (next >= LETTERS.length) { main.report.warnings.push(`${src.rel}: no free variation letter for ${plan.extra.name}`); continue; }
+      const letter = LETTERS[next++];
+      const newRel = src.rel.replace(new RegExp(`(_diff_\\d{3}_)${src.info.variant}(?=(_[a-z]{3})?\\.ytd$)`, 'i'), `$1${letter}`);
+      if (newRel === src.rel || taken.has(newRel.toLowerCase())) { main.report.warnings.push(`${src.rel}: could not name the ${plan.extra.name} variant`); continue; }
+      const newTexName = parseName(newRel).name;
+      let buffer;
+      try { buffer = renameSingleTextureYtd(src.buffer, newTexName); } catch (e) { buffer = null; }
+      if (!buffer) { main.report.warnings.push(`${src.rel}: ${plan.extra.name} variant needs a single-texture .ytd (split ped layout)`); continue; }
+      taken.add(newRel.toLowerCase());
+      plan.synthetic.push({ path: newRel, buffer, from: src.rel, letter });
+    }
+  }
+  for (const plan of plans) {
+    if (!plan.synthetic.length) continue;
+    const onlyPaths = new Set(plan.synthetic.map((s) => s.path));
+    // context = every original file (head skin model, drawables for UV/lens/metal), untouched
+    const run = await recolorFilesCore([...inputFiles, ...plan.synthetic], { ...opts, color: plan.extra.color, onlyPaths });
+    for (const f of run.files) if (onlyPaths.has(f.path)) main.files.push({ ...f, changed: true, extra: plan.extra.name });
+    for (const t of run.report.textures) if (onlyPaths.has(t.file)) main.report.textures.push({ ...t, extra: plan.extra.name });
+    for (const s of plan.synthetic) main.report.extras.push({ file: s.path, from: s.from, variant: s.letter, color: plan.extra.name, hex: plan.extra.color });
+  }
+  if (main.report.extras.length) {
+    main.report.warnings.push('New texture variations were added. The ped .ymt must list them (texture count per drawable) or the game will not use them - see report.extras.');
+  }
+  return main;
+}
+
+module.exports = { recolorStream, recolorFiles, recolorFilesCore, classifyTexture, looksLikeNormalMap, EXTRA_COLORS, extrasList };

@@ -15,6 +15,11 @@ fivem-recolor <stream folder> [options]
   --contrast <n>           detail contrast multiplier (default 1.0)
   --strength <0..1>        blend with original (default 1.0)
   --hair                   recolor hair too
+  --extras none|black|white|both
+                           also add black and/or white versions of every garment as new
+                           texture variations (next free letters, e.g. _a colour, _b black, _c white)
+  --black <#rrggbb>        the "black" used by --extras (default #1c1c1c)
+  --white <#rrggbb>        the "white" used by --extras (default #ececec)
   --component <c>=<policy> override policy, e.g. berd=recolor p_eyes=skip (repeatable)
   --skip <regex>           never touch textures matching (repeatable)
   --quiet
@@ -36,6 +41,9 @@ function parseArgs(argv) {
       case '--contrast': o.recolor.contrast = parseFloat(next()); break;
       case '--strength': o.recolor.strength = parseFloat(next()); break;
       case '--hair': o.recolorHair = true; break;
+      case '--extras': o.extras = next(); break;
+      case '--black': (o.extraColors = o.extraColors || {}).black = next(); break;
+      case '--white': (o.extraColors = o.extraColors || {}).white = next(); break;
       case '--component': { const [k, v] = next().split('='); o.components[k] = v; break; }
       case '--skip': o.skipTextures.push(next()); break;
       case '--quiet': o.quiet = true; break;
@@ -56,6 +64,7 @@ function parseArgs(argv) {
   const skipped = report.textures.filter((t) => t.status !== 'recolored');
   console.log(`\nrecolored ${done.length} texture(s), skipped ${skipped.length}, ${report.seconds}s`);
   for (const t of skipped) console.log(`  skip ${t.texture}: ${t.reason}`);
+  for (const e of report.extras || []) console.log(`  + ${e.color} variant _${e.variant}: ${e.file}`);
   for (const w of report.warnings) console.log(`  warn ${w}`);
   console.log(`output: ${report.output}\nreport: ${path.join(report.output, 'recolor-report.json')}`);
 })().catch((e) => { console.error(e); process.exit(1); });

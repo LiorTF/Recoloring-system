@@ -283,6 +283,24 @@ near-white anyway must not be kept pure white next to cream-tinted ribs.
 Accents themselves grow by hysteresis (confident seeds → connected same-hue texels down to C 0.02),
 because distressed prints are mostly faint speckled colour (measured C 0.02–0.08).
 
+### Black / white extra variants (`extras`)
+Every garment diffuse (split layout, single-texture .ytd) gets extra variations on the next free
+letters, made from the ORIGINAL lowest variant: the .ytd is copied, the texture name (same length:
+only the letter changes) and its dictionary hash are patched in place, and it goes through the full
+pipeline with the extra colour while every other file is loaded as context only (`onlyPaths`) so the
+skin model / UVs / lens / metal logic still applies. Single-file peds (one .ytd holding all textures)
+can't grow in place and are reported. The ped .ymt still has to declare the new texture count.
+* `#1c1c1c` / `#ececec` instead of pure black/white: the dominant material lands on the target; with
+  L = 0 or 1 there is no room left for folds.
+* **Crowded-material flip** (`buildToneCurve`): a print on the side of the fabric with no headroom
+  (white skeleton on a hoodie dyed white) would be squeezed onto the fabric and vanish; the outermost
+  such material is moved to the other side (white print → grey, L ≈ 0.58). Only triggers when the
+  separation would be < 0.1 L; beige/red/black targets are unchanged.
+* **Ink per tone**: neutral ink is only kept next to a coloured print if ≥ 10 % of all sharp-edged ink
+  of that tone touches the print. Measured: white skeleton + small red crosshair 1–2 % (the skeleton
+  is its own design → left to the tone curve; keeping only the ribs touching the crosshair made a
+  mismatched patch in the white variant), grunge logo black ink 24 % (kept).
+
 ---
 
 ## 6. Block compression (`src/texture/`)
@@ -305,9 +323,9 @@ because distressed prints are mostly faint speckled colour (measured C 0.02–0.
   renamed `a_m_y_runner_01`): head/teeth/hair untouched, bare-hands texture fully protected by the
   ped skin model, suit/shirt/tie keep tonal separation; resource flags + system segment byte-identical,
   every non-recolored texture byte-identical.
-* `npm test` (11 tests): synthetic peds (skin + tattoo + khaki strip + tinted lens, race variants),
+* `npm test` (12 tests): synthetic peds (skin + tattoo + khaki strip + tinted lens, race variants),
   UV padding vs flat garment, print ink vs shadow, mesh lens vs frame, visor vs neck liner, full-sleeve tattoos (separate pieces and welded,
-incl. red + white ink) vs shorts.
+incl. red + white ink) vs shorts, red + black `_b` + white `_c` extras with skin untouched.
 * The author's own textures (skeleton tee, WrestleMania tank, leather tracksuit with chrome hardware,
   two-tone hoodie, grey set with pink/black grunge prints) and ig_jayjay's `p_eyes_003` glasses
   (.ydd + .ytd): hardware kept chrome, prints keep pink + black, lenses kept from the mesh.

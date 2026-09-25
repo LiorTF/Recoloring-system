@@ -297,3 +297,32 @@ test('full-sleeve tattoos without separate mesh pieces: interleaved ink kept, bl
   assert.ok(leg / legN > 0.95, `sleeve kept: ${(leg / legN).toFixed(3)}`);
   assert.ok(shorts / sN < 0.03, `shorts not protected: ${(shorts / sN).toFixed(3)}`);
 });
+
+test('extras: red main colour + black _b + white _c variants, skin untouched in all', async () => {
+  const r = rng(91);
+  const skinPx = () => [224 + (r() - 0.5) * 12, 168, 138].map(Math.round);
+  const head = image(64, 64, () => skinPx());
+  // grey hoodie with folds; right quarter is skin (neck) that must stay
+  const cloth = fabric([120, 120, 125], 14, 4);
+  const top = image(128, 128, (x) => (x >= 96 ? skinPx() : cloth()));
+  const files = [
+    { path: 'p9^head_diff_000_a_whi.ytd', buffer: makeYtd([{ name: 'head_diff_000_a_whi', width: 64, height: 64, format: FMT.DXT1, rgba: head }]) },
+    { path: 'p9^jbib_diff_000_a_whi.ytd', buffer: makeYtd([{ name: 'jbib_diff_000_a_whi', width: 128, height: 128, format: FMT.DXT1, rgba: top }]) },
+  ];
+  const { files: out, report } = await recolorFiles(files, { color: '#c0202a', extras: 'both' });
+  const get = (p) => out.find((f) => f.path === p);
+  assert.ok(get('p9^jbib_diff_000_b_whi.ytd'), 'black variant _b created');
+  assert.ok(get('p9^jbib_diff_000_c_whi.ytd'), 'white variant _c created');
+  assert.strictEqual(report.extras.length, 2);
+  const med = (p) => { const { px, t } = decodeFirst(get(p).buffer); const Ls = []; for (let y = 8; y < 120; y++) for (let x = 8; x < 88; x++) Ls.push(labAt(px, y * 128 + x)); return { t, L: median(Ls.map((v) => v[0])), C: median(Ls.map((v) => Math.hypot(v[1], v[2]))), px }; };
+  const a = med('p9^jbib_diff_000_a_whi.ytd'), b = med('p9^jbib_diff_000_b_whi.ytd'), c = med('p9^jbib_diff_000_c_whi.ytd');
+  assert.ok(a.C > 0.1, 'main variant is red');
+  assert.ok(b.L < 0.3 && b.C < 0.03, `_b is black (L ${b.L.toFixed(2)})`);
+  assert.ok(c.L > 0.85 && c.C < 0.03, `_c is white (L ${c.L.toFixed(2)})`);
+  assert.strictEqual(b.t.name, 'jbib_diff_000_b_whi', 'internal texture name follows the variant');
+  const src = decodeFirst(files[1].buffer).px;
+  for (const v of [a, b, c]) {
+    let d = 0, n = 0; for (let y = 8; y < 120; y++) for (let x = 104; x < 124; x++) { const i = (y * 128 + x) * 4; d += Math.abs(v.px[i] - src[i]); n++; }
+    assert.ok(d / n < 3, 'skin identical in every variant');
+  }
+});
